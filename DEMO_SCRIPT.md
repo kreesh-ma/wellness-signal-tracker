@@ -5,12 +5,13 @@
 ---
 
 ### Opening (15 seconds)
-"Hi, I'm [Name]. Today I'll demo the Wellness Signal Tracker — a real-time facial analysis system that monitors screen fatigue and stress indicators during long work sessions."
+"Hi, I'm Kreeshma. Today I'll demo the Wellness Signal Tracker — a real-time facial analysis system that monitors screen fatigue and stress indicators during long work sessions."
 
 ### Show Dashboard (30 seconds)
 1. Open `http://127.0.0.1:8000`
 2. "This is the main dashboard. It shows real-time metrics from your webcam."
 3. Point out: Wellness Score, Blink Rate, Brow Tension, Expression, FPS
+4. "FPS shows the processing speed — it varies based on system load."
 
 ### Start Camera (45 seconds)
 1. Click "Start Camera"
@@ -60,7 +61,7 @@
 ---
 
 ## Key Points to Highlight
-- Real-time processing (12+ FPS)
+- Real-time processing
 - Accurate face detection
 - Responsive dashboard
 - Wellness tips
