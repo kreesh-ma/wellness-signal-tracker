@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wellness Signal Tracker</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Wellness Signal Tracker</h1>
+            <p>Real-time facial analysis for wellness indicators</p>
+        </header>
+        
+        <main>
+            <div class="video-section">
+                <div class="video-container">
+                    <video id="video" autoplay playsinline></video>
+                    <canvas id="overlay"></canvas>
+                    <div class="video-placeholder" id="placeholder">
+                        <span>📷</span>
+                        <p>Click to enable camera</p>
+                    </div>
+                </div>
+                <button id="startBtn" class="btn-primary">Start Camera</button>
+                <div id="cameraStatus" class="camera-status"></div>
+            </div>
+            
+            <div class="metrics-section">
+                <div class="metric-card">
+                    <h3>Wellness Score</h3>
+                    <div class="score" id="wellnessScore">100</div>
+                    <div class="score-bar">
+                        <div class="score-fill" id="scoreFill"></div>
+                    </div>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Blink Rate</h3>
+                    <div class="value" id="blinkRate">0</div>
+                    <div class="unit">blinks/min</div>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Brow Tension</h3>
+                    <div class="value" id="browTension">0.0</div>
+                    <div class="unit">level</div>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>Expression</h3>
+                    <div class="expression" id="expression">neutral</div>
+                </div>
+                
+                <div class="metric-card">
+                    <h3>FPS</h3>
+                    <div class="value" id="fps">0</div>
+                    <div class="unit">frames/sec</div>
+                </div>
+            </div>
+            
+            <div class="chart-section">
+                <canvas id="wellnessChart"></canvas>
+            </div>
+            
+            <div class="tip-section">
+                <div class="tip-card" id="tipCard">
+                    <span>💡</span>
+                    <p id="tipText">Start camera to begin tracking</p>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.sqlite3
+.env
+venv/
+.venv/
+*.log
+.DS_Store
+Thumbs.db
+models/face_detection_yunet_2023mar.onnx
+models/deploy.prototxt
+models/res10_300x300_ssd_iter_140000.caffemodel
