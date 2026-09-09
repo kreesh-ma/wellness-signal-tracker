@@ -12,6 +12,8 @@ class WellnessEngine:
         self.blinking = False
         self.prev_eye_mean = None
         self.frame_count = 0
+        self.last_blink_trigger = 0  # debounce
+        self.MIN_BLINK_INTERVAL = 0.25  # minimum 250ms between blinks
         
     def update_blink(self, ear, eye_region=None):
         current_time = time.time()
@@ -20,25 +22,32 @@ class WellnessEngine:
         if eye_region is not None and eye_region.size > 0:
             current_mean = np.mean(eye_region)
             if self.prev_eye_mean is not None:
-                diff = abs(current_mean - self.prev_eye_mean)
-                # blink causes significant brightness change
-                if diff > 3 and not self.blinking:
+                diff = current_mean - self.prev_eye_mean  # direction matters
+                time_since_last = current_time - self.last_blink_trigger
+                
+                # blink = quick darkening (diff < -threshold) then brightening
+                if diff < -5 and not self.blinking and time_since_last > self.MIN_BLINK_INTERVAL:
                     self.blinking = True
                     self.blink_count += 1
-                elif diff < 1:
+                    self.last_blink_trigger = current_time
+                elif diff > 2:
                     self.blinking = False
+                    
             self.prev_eye_mean = current_mean
         else:
             # fallback to EAR-based detection
-            if ear < 0.18 and not self.blinking:
+            time_since_last = current_time - self.last_blink_trigger
+            if ear < 0.18 and not self.blinking and time_since_last > self.MIN_BLINK_INTERVAL:
                 self.blinking = True
                 self.blink_count += 1
+                self.last_blink_trigger = current_time
             elif ear > 0.22 and self.blinking:
                 self.blinking = False
             
+        # calculate rate every 2 seconds for smoother updates
         elapsed = current_time - self.last_blink_time
-        if elapsed >= 1.0:
-            self.blink_rate = self.blink_count * 60  # blinks per minute
+        if elapsed >= 2.0:
+            self.blink_rate = round((self.blink_count / elapsed) * 60)
             self.blink_count = 0
             self.last_blink_time = current_time
             
