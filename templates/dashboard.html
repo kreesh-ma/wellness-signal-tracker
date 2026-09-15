@@ -8,67 +8,122 @@
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>Wellness Signal Tracker</h1>
-            <p>Real-time facial analysis for wellness indicators</p>
-        </header>
-        
-        <main>
-            <div class="video-section">
-                <div class="video-container">
-                    <video id="video" autoplay playsinline></video>
-                    <canvas id="overlay"></canvas>
-                    <div class="video-placeholder" id="placeholder">
-                        <span>📷</span>
-                        <p>Click to enable camera</p>
+    <div class="dashboard">
+        <aside class="sidebar">
+            <div class="sidebar-logo">
+                <span class="logo-icon">💙</span>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-item active" title="Dashboard">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="3" width="7" height="7"></rect>
+                        <rect x="3" y="14" width="7" height="7"></rect>
+                        <rect x="14" y="14" width="7" height="7"></rect>
+                    </svg>
+                </a>
+                <a href="#" class="nav-item" title="Settings">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+                    </svg>
+                </a>
+            </nav>
+        </aside>
+
+        <main class="main-content">
+            <div class="content-grid">
+                <div class="left-panel">
+                    <div class="video-section">
+                        <div class="video-container">
+                            <video id="video" autoplay playsinline></video>
+                            <canvas id="overlay"></canvas>
+                            <div class="video-placeholder" id="placeholder">
+                                <p>webcam preview</p>
+                            </div>
+                        </div>
+                        <div class="video-controls">
+                            <div class="status-info">
+                                <span class="fps-label">FPS <strong id="fps">13</strong></span>
+                                <span class="tracking-status">
+                                    <span class="status-dot"></span> tracking active
+                                </span>
+                            </div>
+                            <button id="startBtn" class="btn-primary">Stop camera</button>
+                            <div id="cameraStatus" class="camera-status"></div>
+                        </div>
                     </div>
                 </div>
-                <button id="startBtn" class="btn-primary">Start Camera</button>
-                <div id="cameraStatus" class="camera-status"></div>
-            </div>
-            
-            <div class="metrics-section">
-                <div class="metric-card">
-                    <h3>Wellness Score</h3>
-                    <div class="score" id="wellnessScore">100</div>
-                    <div class="score-bar">
-                        <div class="score-fill" id="scoreFill"></div>
+
+                <div class="right-panel">
+                    <div class="metrics-section">
+                        <div class="metric-card score-card">
+                            <div class="score" id="wellnessScore">80</div>
+                            <div class="score-bar">
+                                <div class="score-fill" id="scoreFill"></div>
+                            </div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="value" id="blinkRate">30</div>
+                            <div class="unit">/min</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="value" id="browTension">0.0</div>
+                            <div class="unit">tension</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="expression" id="expression">Neutral</div>
+                        </div>
                     </div>
-                </div>
-                
-                <div class="metric-card">
-                    <h3>Blink Rate</h3>
-                    <div class="value" id="blinkRate">0</div>
-                    <div class="unit">blinks/min</div>
-                </div>
-                
-                <div class="metric-card">
-                    <h3>Brow Tension</h3>
-                    <div class="value" id="browTension">0.0</div>
-                    <div class="unit">level</div>
-                </div>
-                
-                <div class="metric-card">
-                    <h3>Expression</h3>
-                    <div class="expression" id="expression">neutral</div>
-                </div>
-                
-                <div class="metric-card">
-                    <h3>FPS</h3>
-                    <div class="value" id="fps">0</div>
-                    <div class="unit">frames/sec</div>
-                </div>
-            </div>
-            
-            <div class="chart-section">
-                <canvas id="wellnessChart"></canvas>
-            </div>
-            
-            <div class="tip-section">
-                <div class="tip-card" id="tipCard">
-                    <span>💡</span>
-                    <p id="tipText">Start camera to begin tracking</p>
+
+                    <div class="chart-section">
+                        <div class="chart-header">
+                            <span class="legend-item"><span class="legend-dot green"></span> Wellness score</span>
+                            <span class="legend-item"><span class="legend-dot cyan"></span> Blink rate</span>
+                        </div>
+                        <canvas id="wellnessChart"></canvas>
+                    </div>
+
+                    <div class="tip-section">
+                        <div class="tip-card" id="tipCard">
+                            <span>💡</span>
+                            <p id="tipText">You're doing well. Keep it up.</p>
+                        </div>
+                    </div>
+
+                    <div class="session-section">
+                        <h3 class="section-title">Session log</h3>
+                        <table class="session-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Score</th>
+                                    <th>Blink</th>
+                                    <th>Expression</th>
+                                </tr>
+                            </thead>
+                            <tbody id="sessionLog">
+                                <tr>
+                                    <td>18:00:41</td>
+                                    <td>80</td>
+                                    <td>30/min</td>
+                                    <td><span class="expr-badge neutral">Neutral</span></td>
+                                </tr>
+                                <tr>
+                                    <td>18:00:26</td>
+                                    <td>76</td>
+                                    <td>28/min</td>
+                                    <td><span class="expr-badge neutral">Neutral</span></td>
+                                </tr>
+                                <tr>
+                                    <td>18:00:11</td>
+                                    <td>62</td>
+                                    <td>24/min</td>
+                                    <td><span class="expr-badge focused">Focused</span></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </main>

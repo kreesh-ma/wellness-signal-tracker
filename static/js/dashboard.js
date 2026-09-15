@@ -13,6 +13,7 @@ const exprEl = document.getElementById('expression');
 const scoreFill = document.getElementById('scoreFill');
 const tipText = document.getElementById('tipText');
 const fpsEl = document.getElementById('fps');
+const sessionLog = document.getElementById('sessionLog');
 
 let ws;
 let isRunning = false;
@@ -33,31 +34,35 @@ function initChart() {
                     data: [],
                     borderColor: '#00ff88',
                     tension: 0.4,
-                    fill: false
+                    fill: false,
+                    pointRadius: 0
                 }, {
                     label: 'Blink Rate',
                     data: [],
-                    borderColor: '#00d4ff',
+                    borderColor: '#00b4d8',
                     tension: 0.4,
-                    fill: false
+                    fill: false,
+                    pointRadius: 0
                 }]
             },
             options: {
                 responsive: true,
+                maintainAspectRatio: true,
+                aspectRatio: 2.5,
                 scales: {
                     y: {
                         beginAtZero: true,
                         max: 100,
-                        grid: { color: 'rgba(255,255,255,0.1)' },
-                        ticks: { color: '#888' }
+                        grid: { color: 'rgba(0, 180, 216, 0.08)' },
+                        ticks: { color: '#5a7a9a', font: { size: 11 } }
                     },
                     x: {
-                        grid: { color: 'rgba(255,255,255,0.1)' },
-                        ticks: { color: '#888' }
+                        grid: { color: 'rgba(0, 180, 216, 0.08)' },
+                        ticks: { color: '#5a7a9a', font: { size: 11 }, maxTicksLimit: 8 }
                     }
                 },
                 plugins: {
-                    legend: { labels: { color: '#fff' } }
+                    legend: { display: false }
                 }
             }
         });
@@ -67,7 +72,6 @@ function initChart() {
     }
 }
 
-// Initialize when DOM is ready
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initChart);
 } else {
@@ -95,6 +99,8 @@ function updateMetrics(data) {
     scoreFill.style.width = data.wellness_score + '%';
     tipText.textContent = data.tip;
     
+    addSessionEntry(data);
+    
     if (chart) {
         const time = new Date().toLocaleTimeString();
         chart.data.labels.push(time);
@@ -111,6 +117,26 @@ function updateMetrics(data) {
     }
 }
 
+function addSessionEntry(data) {
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const exprClass = data.expression.toLowerCase();
+    const badgeClass = exprClass === 'focused' ? 'focused' : 'neutral';
+    
+    const row = document.createElement('tr');
+    row.innerHTML = `
+        <td>${time}</td>
+        <td>${data.wellness_score}</td>
+        <td>${data.blink_rate}/min</td>
+        <td><span class="expr-badge ${badgeClass}">${data.expression}</span></td>
+    `;
+    
+    sessionLog.insertBefore(row, sessionLog.firstChild);
+    
+    if (sessionLog.children.length > 10) {
+        sessionLog.removeChild(sessionLog.lastChild);
+    }
+}
+
 async function startCamera() {
     console.log('Start camera clicked');
     startBtn.disabled = true;
@@ -119,47 +145,38 @@ async function startCamera() {
     cameraStatus.className = 'camera-status';
     
     try {
-        console.log('Checking camera API...');
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             throw new Error('Camera API not supported in this browser');
         }
-        console.log('Camera API available, requesting stream...');
         
         const stream = await navigator.mediaDevices.getUserMedia({ 
             video: { width: 640, height: 480, facingMode: 'user' } 
         });
-        console.log('Camera stream obtained:', stream);
         
         video.srcObject = stream;
         video.style.display = 'block';
         placeholder.style.display = 'none';
-        startBtn.textContent = 'Stop Camera';
+        startBtn.textContent = 'Stop camera';
         startBtn.disabled = false;
         isRunning = true;
         cameraStatus.textContent = 'Camera active - Detecting face...';
         cameraStatus.className = 'camera-status active';
-        console.log('Connecting WebSocket...');
         connectWebSocket();
-        console.log('Starting face detection...');
         detectFace();
     } catch (err) {
         console.error('Camera error:', err);
-        startBtn.textContent = 'Start Camera';
+        startBtn.textContent = 'Start camera';
         startBtn.disabled = false;
         cameraStatus.className = 'camera-status error';
         
         if (err.name === 'NotAllowedError') {
             cameraStatus.textContent = 'Camera permission denied';
-            alert('Camera permission denied.\n\nTo fix:\n1. Click the lock/camera icon in address bar\n2. Select "Allow" for camera\n3. Refresh page');
         } else if (err.name === 'NotFoundError') {
             cameraStatus.textContent = 'No camera found';
-            alert('No camera found.\n\nPlease connect a webcam and try again.');
         } else if (err.name === 'NotReadableError') {
             cameraStatus.textContent = 'Camera in use';
-            alert('Camera is in use by another application.\n\nClose other apps using camera and try again.');
         } else {
             cameraStatus.textContent = 'Error: ' + err.message;
-            alert('Camera error: ' + err.message);
         }
     }
 }
@@ -171,7 +188,7 @@ function stopCamera() {
     }
     video.srcObject = null;
     placeholder.style.display = 'flex';
-    startBtn.textContent = 'Start Camera';
+    startBtn.textContent = 'Start camera';
     isRunning = false;
     if (ws) ws.close();
 }
@@ -192,7 +209,6 @@ async function detectFace() {
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     
-    // capture frame - smaller size for better performance
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = 320;
     tempCanvas.height = 240;
@@ -201,7 +217,6 @@ async function detectFace() {
     const imageData = tempCanvas.toDataURL('image/jpeg', 0.6);
     
     try {
-        console.log('Sending frame to server...');
         const response = await fetch('/api/analyze/', {
             method: 'POST',
             headers: {
@@ -210,9 +225,7 @@ async function detectFace() {
             body: JSON.stringify({ image: imageData })
         });
         
-        console.log('Response received:', response.status);
         const result = await response.json();
-        console.log('Analysis result:', result);
         
         if (result.face_detected && result.overlay) {
             cameraStatus.textContent = 'Face detected - Tracking...';
@@ -245,20 +258,15 @@ async function detectFace() {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('DOM loaded, attaching event listener');
     const btn = document.getElementById('startBtn');
-    console.log('Button found:', btn);
     
     btn.addEventListener('click', function() {
-        console.log('=== BUTTON CLICKED ===');
         if (isRunning) {
             stopCamera();
         } else {
             startCamera();
         }
     });
-    
-    console.log('Event listener attached');
 });
 
 video.addEventListener('loadedmetadata', function() {
