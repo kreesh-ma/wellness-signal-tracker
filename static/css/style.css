@@ -6,7 +6,7 @@
 
 body {
     font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+    background: linear-gradient(135deg, #0a1628 0%, #0d2137 50%, #0f2d4a 100%);
     color: #fff;
     min-height: 100vh;
     animation: gradientBG 15s ease infinite;
@@ -46,18 +46,18 @@ header {
 }
 
 @keyframes glow {
-    0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.3); }
-    50% { box-shadow: 0 0 40px rgba(0, 212, 255, 0.6); }
+    0%, 100% { box-shadow: 0 0 20px rgba(0, 180, 216, 0.3); }
+    50% { box-shadow: 0 0 40px rgba(0, 180, 216, 0.6); }
 }
 
 header h1 {
     font-size: 2.8rem;
-    background: linear-gradient(90deg, #00d4ff, #7b2cbf, #00ff88);
+    background: linear-gradient(90deg, #00b4d8, #0077b6, #48cae4);
     background-size: 200% auto;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     animation: gradientText 3s ease infinite;
-    text-shadow: 0 0 30px rgba(0, 212, 255, 0.5);
+    text-shadow: 0 0 30px rgba(0, 180, 216, 0.5);
 }
 
 @keyframes gradientText {
@@ -67,7 +67,7 @@ header h1 {
 }
 
 header p {
-    color: #a0a0a0;
+    color: #90e0ef;
     font-size: 1.1rem;
     margin-top: 10px;
 }
@@ -79,11 +79,11 @@ main {
 }
 
 .video-section {
-    background: rgba(255,255,255,0.03);
+    background: rgba(0, 119, 182, 0.1);
     border-radius: 20px;
     padding: 25px;
     text-align: center;
-    border: 1px solid rgba(255,255,255,0.1);
+    border: 1px solid rgba(0, 180, 216, 0.2);
     backdrop-filter: blur(10px);
     animation: glow 3s ease infinite;
 }
@@ -96,7 +96,7 @@ main {
     background: #000;
     border-radius: 15px;
     overflow: hidden;
-    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
 }
 
 video {
@@ -123,8 +123,8 @@ canvas {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    color: #666;
+    background: linear-gradient(135deg, #0d2137 0%, #1a3a52 100%);
+    color: #90e0ef;
 }
 
 .video-placeholder span {
@@ -134,7 +134,7 @@ canvas {
 }
 
 .btn-primary {
-    background: linear-gradient(90deg, #00d4ff, #7b2cbf);
+    background: linear-gradient(90deg, #0077b6, #00b4d8);
     color: #fff;
     border: none;
     padding: 15px 40px;
@@ -151,7 +151,7 @@ canvas {
 
 .btn-primary:hover {
     transform: translateY(-3px);
-    box-shadow: 0 10px 30px rgba(0,212,255,0.5);
+    box-shadow: 0 10px 30px rgba(0, 180, 216, 0.5);
 }
 
 .btn-primary:disabled {
@@ -163,18 +163,18 @@ canvas {
 .camera-status {
     margin-top: 15px;
     font-size: 0.95rem;
-    color: #888;
+    color: #90e0ef;
     min-height: 25px;
     transition: all 0.3s ease;
 }
 
 .camera-status.active {
-    color: #00ff88;
-    text-shadow: 0 0 10px rgba(0,255,136,0.5);
+    color: #48cae4;
+    text-shadow: 0 0 10px rgba(72, 202, 228, 0.5);
 }
 
 .camera-status.error {
-    color: #ff4444;
+    color: #ff6b6b;
 }
 
 .metrics-section {
@@ -184,24 +184,24 @@ canvas {
 }
 
 .metric-card {
-    background: rgba(255,255,255,0.03);
+    background: rgba(0, 119, 182, 0.1);
     border-radius: 20px;
     padding: 25px;
     text-align: center;
-    border: 1px solid rgba(255,255,255,0.1);
+    border: 1px solid rgba(0, 180, 216, 0.2);
     backdrop-filter: blur(10px);
     transition: all 0.3s ease;
 }
 
 .metric-card:hover {
     transform: translateY(-5px);
-    border-color: rgba(0,212,255,0.5);
-    box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+    border-color: rgba(0, 180, 216, 0.5);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
 }
 
 .metric-card h3 {
     font-size: 0.85rem;
-    color: #888;
+    color: #90e0ef;
     margin-bottom: 12px;
     text-transform: uppercase;
     letter-spacing: 2px;
@@ -210,15 +210,15 @@ canvas {
 .score {
     font-size: 3.5rem;
     font-weight: bold;
-    background: linear-gradient(90deg, #00ff88, #00d4ff);
+    background: linear-gradient(90deg, #48cae4, #00b4d8);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    text-shadow: 0 0 20px rgba(0,255,136,0.3);
+    text-shadow: 0 0 20px rgba(72, 202, 228, 0.3);
 }
 
 .score-bar {
     height: 8px;
-    background: rgba(255,255,255,0.1);
+    background: rgba(255, 255, 255, 0.1);
     border-radius: 4px;
     margin-top: 15px;
     overflow: hidden;
@@ -226,7 +226,7 @@ canvas {
 
 .score-fill {
     height: 100%;
-    background: linear-gradient(90deg, #ff4444, #ffaa00, #00ff88);
+    background: linear-gradient(90deg, #ff6b6b, #ffd93d, #48cae4);
     width: 100%;
     transition: width 0.5s ease;
     border-radius: 4px;
@@ -235,13 +235,13 @@ canvas {
 .value {
     font-size: 2.8rem;
     font-weight: bold;
-    color: #00d4ff;
-    text-shadow: 0 0 15px rgba(0,212,255,0.3);
+    color: #00b4d8;
+    text-shadow: 0 0 15px rgba(0, 180, 216, 0.3);
 }
 
 .unit {
     font-size: 0.8rem;
-    color: #666;
+    color: #90e0ef;
     margin-top: 8px;
     text-transform: uppercase;
     letter-spacing: 1px;
@@ -251,17 +251,17 @@ canvas {
     font-size: 1.6rem;
     text-transform: capitalize;
     padding: 12px 25px;
-    background: linear-gradient(135deg, rgba(0,212,255,0.2), rgba(123,44,191,0.2));
+    background: linear-gradient(135deg, rgba(0, 180, 216, 0.2), rgba(0, 119, 182, 0.2));
     border-radius: 25px;
     display: inline-block;
-    border: 1px solid rgba(0,212,255,0.3);
+    border: 1px solid rgba(0, 180, 216, 0.3);
 }
 
 .chart-section {
-    background: rgba(255,255,255,0.03);
+    background: rgba(0, 119, 182, 0.1);
     border-radius: 20px;
     padding: 25px;
-    border: 1px solid rgba(255,255,255,0.1);
+    border: 1px solid rgba(0, 180, 216, 0.2);
     backdrop-filter: blur(10px);
 }
 
@@ -270,19 +270,19 @@ canvas {
 }
 
 .tip-card {
-    background: linear-gradient(135deg, rgba(0,212,255,0.15), rgba(123,44,191,0.15));
+    background: linear-gradient(135deg, rgba(0, 180, 216, 0.15), rgba(0, 119, 182, 0.15));
     border-radius: 20px;
     padding: 25px;
     display: flex;
     align-items: center;
     gap: 20px;
-    border: 1px solid rgba(0,212,255,0.2);
+    border: 1px solid rgba(0, 180, 216, 0.2);
     transition: all 0.3s ease;
 }
 
 .tip-card:hover {
     transform: translateX(10px);
-    border-color: rgba(0,212,255,0.5);
+    border-color: rgba(0, 180, 216, 0.5);
 }
 
 .tip-card span {
@@ -292,7 +292,7 @@ canvas {
 
 .tip-card p {
     font-size: 1.2rem;
-    color: #ccc;
+    color: #caf0f8;
     line-height: 1.6;
 }
 
