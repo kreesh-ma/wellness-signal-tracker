@@ -398,6 +398,11 @@ canvas {
     color: #00ff88;
 }
 
+.expr-badge.stressed {
+    background: rgba(255, 107, 107, 0.15);
+    color: #ff6b6b;
+}
+
 /* Responsive */
 @media (max-width: 1024px) {
     .content-grid {

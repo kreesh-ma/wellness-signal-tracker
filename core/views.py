@@ -46,7 +46,7 @@ def get_latest(request):
         data = {
             'blink_rate': 0,
             'brow_tension': 0,
-            'expression': 'neutral',
+            'expression': 'Neutral',
             'wellness_score': 100,
             'timestamp': '--:--:--',
         }

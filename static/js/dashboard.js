@@ -21,6 +21,8 @@ let lastFrameTime = 0;
 let frameCount = 0;
 let fps = 0;
 let chart = null;
+let lastSessionUpdate = 0;
+let lastChartData = { score: 100, blink: 0 };
 
 function initChart() {
     try {
@@ -33,32 +35,37 @@ function initChart() {
                     label: 'Wellness Score',
                     data: [],
                     borderColor: '#00ff88',
+                    backgroundColor: 'rgba(0, 255, 136, 0.1)',
                     tension: 0.4,
-                    fill: false,
-                    pointRadius: 0
+                    fill: true,
+                    pointRadius: 0,
+                    borderWidth: 2
                 }, {
                     label: 'Blink Rate',
                     data: [],
                     borderColor: '#00b4d8',
+                    backgroundColor: 'rgba(0, 180, 216, 0.1)',
                     tension: 0.4,
-                    fill: false,
-                    pointRadius: 0
+                    fill: true,
+                    pointRadius: 0,
+                    borderWidth: 2
                 }]
             },
             options: {
                 responsive: true,
                 maintainAspectRatio: true,
                 aspectRatio: 2.5,
+                animation: false,
                 scales: {
                     y: {
                         beginAtZero: true,
                         max: 100,
-                        grid: { color: 'rgba(0, 180, 216, 0.08)' },
-                        ticks: { color: '#5a7a9a', font: { size: 11 } }
+                        grid: { color: 'rgba(0, 180, 216, 0.15)' },
+                        ticks: { color: '#7a9aba', font: { size: 11 } }
                     },
                     x: {
-                        grid: { color: 'rgba(0, 180, 216, 0.08)' },
-                        ticks: { color: '#5a7a9a', font: { size: 11 }, maxTicksLimit: 8 }
+                        grid: { color: 'rgba(0, 180, 216, 0.1)' },
+                        ticks: { color: '#7a9aba', font: { size: 10 }, maxTicksLimit: 6 }
                     }
                 },
                 plugins: {
@@ -99,40 +106,49 @@ function updateMetrics(data) {
     scoreFill.style.width = data.wellness_score + '%';
     tipText.textContent = data.tip;
     
-    addSessionEntry(data);
+    // Throttle session log updates to every 3 seconds
+    const now = Date.now();
+    if (now - lastSessionUpdate > 3000) {
+        addSessionEntry(data);
+        lastSessionUpdate = now;
+    }
     
-    if (chart) {
-        const time = new Date().toLocaleTimeString();
+    // Update chart every 2 seconds
+    if (chart && (now - lastChartData.updateTime > 2000 || !lastChartData.updateTime)) {
+        const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
         chart.data.labels.push(time);
         chart.data.datasets[0].data.push(data.wellness_score);
-        chart.data.datasets[1].data.push(data.blink_rate * 5);
+        chart.data.datasets[1].data.push(Math.min(100, data.blink_rate * 3));
         
-        if (chart.data.labels.length > 30) {
+        if (chart.data.labels.length > 20) {
             chart.data.labels.shift();
             chart.data.datasets[0].data.shift();
             chart.data.datasets[1].data.shift();
         }
         
         chart.update('none');
+        lastChartData.updateTime = now;
     }
 }
 
 function addSessionEntry(data) {
     const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-    const exprClass = data.expression.toLowerCase();
-    const badgeClass = exprClass === 'focused' ? 'focused' : 'neutral';
+    const expression = data.expression.charAt(0).toUpperCase() + data.expression.slice(1);
+    const exprClass = expression.toLowerCase();
+    const badgeClass = exprClass === 'focused' ? 'focused' : exprClass === 'stressed' ? 'stressed' : 'neutral';
     
     const row = document.createElement('tr');
     row.innerHTML = `
         <td>${time}</td>
         <td>${data.wellness_score}</td>
         <td>${data.blink_rate}/min</td>
-        <td><span class="expr-badge ${badgeClass}">${data.expression}</span></td>
+        <td><span class="expr-badge ${badgeClass}">${expression}</span></td>
     `;
     
     sessionLog.insertBefore(row, sessionLog.firstChild);
     
-    if (sessionLog.children.length > 10) {
+    // Keep only last 15 entries
+    while (sessionLog.children.length > 15) {
         sessionLog.removeChild(sessionLog.lastChild);
     }
 }
