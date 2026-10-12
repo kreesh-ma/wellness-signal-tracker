@@ -2,7 +2,7 @@ import urllib.request
 import bz2
 import os
 
-url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
+url = "https://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
 output_path = "models/shape_predictor_68_face_landmarks.dat"
 
 print("Downloading dlib shape predictor model...")

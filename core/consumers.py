@@ -20,9 +20,10 @@ class WellnessConsumer(AsyncWebsocketConsumer):
         )
     
     async def receive(self, text_data):
+        # Client sends wellness data - just broadcast to group
+        # Don't save to DB here (analysis view handles persistence)
+        # Don't trust client data for anything critical
         data = json.loads(text_data)
-        
-        await self.save_reading(data)
         
         await self.channel_layer.group_send(
             self.room_group_name,
@@ -35,12 +36,3 @@ class WellnessConsumer(AsyncWebsocketConsumer):
     async def wellness_update(self, event):
         data = event['data']
         await self.send(text_data=json.dumps(data))
-    
-    @database_sync_to_async
-    def save_reading(self, data):
-        WellnessReading.objects.create(
-            blink_rate=data.get('blink_rate', 0),
-            brow_tension=data.get('brow_tension', 0),
-            expression=data.get('expression', 'neutral'),
-            wellness_score=data.get('wellness_score', 100)
-        )

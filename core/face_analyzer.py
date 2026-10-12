@@ -1,9 +1,15 @@
+import logging
+import math
+import ssl
+import urllib.request
+from pathlib import Path
+
 import cv2
 import dlib
 import numpy as np
-from pathlib import Path
-import urllib.request
-import ssl
+
+log = logging.getLogger(__name__)
+
 
 class FaceAnalyzer:
     def __init__(self):
@@ -22,51 +28,78 @@ class FaceAnalyzer:
             self._download_yunet(model_dir, yunet_path)
 
         self.fd = cv2.FaceDetectorYN_create(str(yunet_path), '', (320, 320))
+        # OpenCV's default 0.9 cut-off is borderline for webcam frames
+        # (real faces often score 0.85-0.9), which made detection flicker.
+        self.fd.setScoreThreshold(0.6)
         print("YuNet face detector loaded")
 
         self.predictor = None
+        predictor_path = model_dir / 'shape_predictor_68_face_landmarks.dat'
         try:
-            predictor_path = model_dir / 'shape_predictor_68_face_landmarks.dat'
             if predictor_path.exists():
                 self.predictor = dlib.shape_predictor(str(predictor_path))
                 print("dlib predictor loaded")
+            else:
+                print(f"WARNING: {predictor_path} not found - landmarks will be FAKE "
+                      f"and blink/brow metrics are disabled")
         except Exception as e:
             print(f"dlib predictor failed: {e}")
 
     def _download_yunet(self, model_dir, dest):
+        # NOTE: certificate verification is disabled here; prefer download_model.py
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        url = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
+        url = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
+               "face_detection_yunet/face_detection_yunet_2023mar.onnx")
         print("Downloading YuNet face detection model...")
         urllib.request.urlretrieve(url, str(dest))
         print("Download complete!")
 
+    # ------------------------------------------------------------------
+    # Detection / landmarks
+    # ------------------------------------------------------------------
     def detect_faces(self, frame):
         h, w = frame.shape[:2]
-        self.fd.setInputSize((w, h))
-        ret, faces = self.fd.detect(frame)
-        
+        # YuNet runs on a downscaled copy: 640x480 costs ~20ms, 320x240 ~6ms,
+        # and the score for a webcam face barely changes. dlib still runs on
+        # the full-resolution frame so landmark accuracy is unaffected.
+        scale = min(1.0, 320.0 / max(w, h))
+        if scale < 1.0:
+            dw, dh = int(round(w * scale)), int(round(h * scale))
+            small = cv2.resize(frame, (dw, dh), interpolation=cv2.INTER_AREA)
+        else:
+            dw, dh, small, scale = w, h, frame, 1.0
+
+        self.fd.setInputSize((dw, dh))
+        ret, faces = self.fd.detect(small)
+
         dlib_faces = []
         if faces is not None:
+            inv = 1.0 / scale
+            # largest face first, so the main user wins over people in the background
+            faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
             for face in faces:
-                x, y, fw, fh = face[0], face[1], face[2], face[3]
+                x, y, fw, fh = face[0] * inv, face[1] * inv, face[2] * inv, face[3] * inv
                 x1, y1 = int(max(0, x)), int(max(0, y))
                 x2, y2 = int(min(w, x + fw)), int(min(h, y + fh))
-                dlib_faces.append(dlib.rectangle(x1, y1, x2, y2))
+                if x2 > x1 and y2 > y1:
+                    dlib_faces.append(dlib.rectangle(x1, y1, x2, y2))
         return dlib_faces
 
     def get_landmarks(self, frame, face):
+        """Returns (landmarks, is_real). is_real is False for the approximate fallback."""
         if self.predictor is not None:
             try:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                if not gray.flags['C_CONTIGUOUS']:
-                    gray = np.ascontiguousarray(gray)
-                landmarks = self.predictor(gray, face)
-                return np.array([[landmarks.part(i).x, landmarks.part(i).y] for i in range(68)])
+                gray = np.ascontiguousarray(gray, dtype=np.uint8)
+                shape = self.predictor(gray, face)
+                pts = np.array([[shape.part(i).x, shape.part(i).y] for i in range(68)],
+                               dtype=np.int32)
+                return pts, True
             except Exception as e:
-                print(f"dlib predictor failed: {e}")
-        return self._approximate_landmarks(face)
+                log.warning("dlib predictor failed: %s", e)
+        return self._approximate_landmarks(face), False
 
     def _approximate_landmarks(self, face):
         x, y = face.left(), face.top()
@@ -91,11 +124,10 @@ class FaceAnalyzer:
         for i in range(3):
             landmarks[32+i] = [int(x + w*0.35 + i*w*0.15), int(y + h*0.65)]
 
-        # left eye (36-41) - almond shape for blink detection
         lcx = x + w * 0.35
         lcy = y + h * 0.40
         ew = w * 0.10
-        eh = h * 0.025  # reduced height for better blink detection
+        eh = h * 0.025
         landmarks[36] = [int(lcx - ew), int(lcy)]
         landmarks[37] = [int(lcx - ew*0.4), int(lcy - eh)]
         landmarks[38] = [int(lcx + ew*0.4), int(lcy - eh)]
@@ -103,7 +135,6 @@ class FaceAnalyzer:
         landmarks[40] = [int(lcx + ew*0.4), int(lcy + eh)]
         landmarks[41] = [int(lcx - ew*0.4), int(lcy + eh)]
 
-        # right eye (42-47) - almond shape for blink detection
         rcx = x + w * 0.65
         rcy = y + h * 0.40
         landmarks[42] = [int(rcx - ew), int(rcy)]
@@ -124,60 +155,105 @@ class FaceAnalyzer:
 
         return landmarks
 
+    # ------------------------------------------------------------------
+    # Metrics
+    # ------------------------------------------------------------------
     def eye_aspect_ratio(self, eye):
         A = np.linalg.norm(eye[1] - eye[5])
         B = np.linalg.norm(eye[2] - eye[4])
         C = np.linalg.norm(eye[0] - eye[3])
         if C == 0:
-            return 0.3
-        ear = (A + B) / (2.0 * C)
-        return ear
+            return 0.0   # invalid; the engine ignores ear <= 0
+        return (A + B) / (2.0 * C)
 
-    def brow_tension(self, landmarks):
-        left_brow = landmarks[17:22]
-        left_eye = landmarks[36:42]
-        right_brow = landmarks[22:27]
-        right_eye = landmarks[42:48]
+    def brow_height(self, landmarks):
+        """Brow-to-upper-eyelid distance divided by inter-ocular distance, x100.
 
-        left_dist = np.mean([np.linalg.norm(brow - eye) for brow, eye in zip(left_brow, left_eye)])
-        right_dist = np.mean([np.linalg.norm(brow - eye) for brow, eye in zip(right_brow, right_eye)])
+        Scale-independent (leaning toward the camera doesn't change it). It is
+        LOWER when brows are pulled down/furrowed, so the engine measures the
+        drop from the user's neutral value to get 'tension'.
+        """
+        pts = landmarks.astype(np.float64)
+        iod = np.linalg.norm(pts[36] - pts[45])      # outer corner to outer corner
+        if iod == 0:
+            return None
+        left = np.linalg.norm(pts[18:21].mean(axis=0) - pts[37:39].mean(axis=0))
+        right = np.linalg.norm(pts[23:26].mean(axis=0) - pts[43:45].mean(axis=0))
+        return float((left + right) / 2.0 / iod * 100.0)
 
-        return (left_dist + right_dist) / 2.0
+    # coarse head-pose heuristics (see estimate_head_pose)
+    YAW_NOSE_DEPTH = 0.8     # nose protrusion as a fraction of inter-ocular distance
+    PITCH_BASE_RATIO = 0.35  # nose-below-eye-line / eye-line-to-chin when frontal
+    PITCH_SCALE = 3.5
 
+    def estimate_head_pose(self, landmarks):
+        """Coarse yaw/pitch in degrees from the 2D landmarks (roll-corrected).
+
+        yaw   = nose shift ALONG the eye line, normalised by inter-ocular
+                distance (> 0 = head turned toward image right)
+        pitch = nose drop BELOW the eye line, normalised by eye-line-to-chin
+                height (> 0 = looking down)
+
+        Neck rolls / looking away distort the eye landmarks enough to fake a
+        long eye closure, so the engine skips drowsiness tracking beyond
+        POSE_MAX_YAW / POSE_MAX_PITCH.
+        """
+        pts = np.asarray(landmarks, dtype=np.float64)
+        left, right = pts[36], pts[45]
+        eye_vec = right - left
+        iod = float(np.linalg.norm(eye_vec))
+        if iod < 1.0:
+            return 0.0, 0.0
+        eye_dir = eye_vec / iod
+        perp = np.array([-eye_dir[1], eye_dir[0]])  # unit, downward at zero roll
+        mid = (left + right) / 2.0
+        d = pts[30] - mid                           # nose tip vs eye-line midpoint
+        along = float(d @ eye_dir)
+        vert = float(d @ perp)
+        face_h = float((pts[8] - mid) @ perp)       # eye line to chin
+        if face_h < iod * 0.5:
+            return 0.0, 0.0
+        yaw = math.degrees(math.asin(
+            max(-1.0, min(1.0, along / (self.YAW_NOSE_DEPTH * iod)))))
+        pitch = math.degrees(math.atan(
+            (vert / face_h - self.PITCH_BASE_RATIO) * self.PITCH_SCALE))
+        return yaw, pitch
+
+    # ------------------------------------------------------------------
+    # Drawing
+    # ------------------------------------------------------------------
     def draw_landmarks(self, frame, landmarks, face_rect=None):
         overlay = frame.copy()
+        landmarks = np.asarray(landmarks, dtype=np.int32)
 
         if face_rect is not None:
             cv2.rectangle(overlay,
-                         (face_rect.left(), face_rect.top()),
-                         (face_rect.right(), face_rect.bottom()),
-                         (0, 255, 0), 2)
+                          (face_rect.left(), face_rect.top()),
+                          (face_rect.right(), face_rect.bottom()),
+                          (0, 255, 0), 2)
 
-        for i in self.FACE_OVAL:
-            pt1 = tuple(landmarks[i])
-            pt2 = tuple(landmarks[(i + 1) % 17])
-            cv2.line(overlay, pt1, pt2, (200, 200, 200), 1)
+        for i in self.FACE_OVAL[:-1]:
+            cv2.line(overlay, tuple(landmarks[i]), tuple(landmarks[i + 1]), (200, 200, 200), 1)
 
         for eye_indices in [self.LEFT_EYE, self.RIGHT_EYE]:
-            pts = landmarks[eye_indices]
-            cv2.polylines(overlay, [pts], True, (0, 255, 255), 2)
+            cv2.polylines(overlay, [landmarks[eye_indices]], True, (0, 255, 255), 2)
 
         for brow_indices in [self.LEFT_BROW, self.RIGHT_BROW]:
-            pts = landmarks[brow_indices]
-            cv2.polylines(overlay, [pts], True, (255, 200, 0), 2)
+            cv2.polylines(overlay, [landmarks[brow_indices]], True, (255, 200, 0), 2)
 
         for i in self.NOSE[:-1]:
-            pt1 = tuple(landmarks[i])
-            pt2 = tuple(landmarks[i + 1])
-            cv2.line(overlay, pt1, pt2, (200, 200, 200), 1)
+            cv2.line(overlay, tuple(landmarks[i]), tuple(landmarks[i + 1]), (200, 200, 200), 1)
 
         cv2.polylines(overlay, [landmarks[self.MOUTH]], True, (0, 100, 255), 2)
 
-        for i, point in enumerate(landmarks):
+        for point in landmarks:
             cv2.circle(overlay, tuple(point), 2, (0, 255, 0), -1)
 
         return overlay
 
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
     def analyze_frame(self, frame):
         if frame.dtype != np.uint8:
             frame = frame.astype(np.uint8)
@@ -189,21 +265,27 @@ class FaceAnalyzer:
             return None
 
         face = faces[0]
-        landmarks = self.get_landmarks(frame, face)
+        landmarks, is_real = self.get_landmarks(frame, face)
 
-        left_eye = landmarks[36:42]
-        right_eye = landmarks[42:48]
+        if is_real:
+            avg_ear = (self.eye_aspect_ratio(landmarks[36:42]) +
+                       self.eye_aspect_ratio(landmarks[42:48])) / 2.0
+            brow = self.brow_height(landmarks)
+        else:
+            # Fake landmarks would give a constant EAR/brow and poison calibration
+            avg_ear, brow = None, None
 
-        left_ear = self.eye_aspect_ratio(left_eye)
-        right_ear = self.eye_aspect_ratio(right_eye)
-        avg_ear = (left_ear + right_ear) / 2.0
+        log.debug("ear=%s brow_height=%s real_landmarks=%s", avg_ear, brow, is_real)
 
-        brow = self.brow_tension(landmarks)
+        yaw, pitch = self.estimate_head_pose(landmarks)
 
         return {
             'face_detected': True,
+            'landmarks_real': is_real,
             'ear': avg_ear,
-            'brow_tension': brow,
+            'brow_height': brow,
+            'brow_tension': brow,   # alias so existing views keep working; engine converts it
+            'head_pose': {'yaw': round(yaw, 1), 'pitch': round(pitch, 1)},
             'landmarks': landmarks.tolist(),
             'face_rect': {
                 'left': face.left(),

@@ -1,6 +1,7 @@
 import cv2
 import sys
-sys.path.insert(0, 'C:\\Users\\Kreeshma\\codestorm')
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.face_analyzer import FaceAnalyzer
 
@@ -22,7 +23,7 @@ while True:
     result = analyzer.analyze_frame(frame)
     
     if result:
-        print(f"Face detected! EAR: {result['ear']:.3f}, Brow: {result['brow_tension']:.2f}")
+        print(f"Face detected! EAR: {result['ear']:.3f}, Brow: {result['brow_tension']:.2f}, FaceRect: {result['face_rect']}")
     
     cv2.imshow('Test', frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):

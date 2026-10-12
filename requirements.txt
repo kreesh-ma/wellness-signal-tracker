@@ -2,6 +2,8 @@ django>=5.0
 channels>=4.0
 daphne>=4.0
 opencv-python>=4.8
-dlib>=19.24
+# dlib-bin ships prebuilt wheels that work with numpy>=2; the plain `dlib`
+# package (19.22) fails under numpy 2 with "Unsupported image type".
+dlib-bin>=20.0.1
 numpy>=1.24
 scikit-learn>=1.3

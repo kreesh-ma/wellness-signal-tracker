@@ -1,5 +1,6 @@
 import sys
-sys.path.insert(0, 'C:\\Users\\Kreeshma\\codestorm')
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.face_analyzer import FaceAnalyzer
 from core.wellness_engine import WellnessEngine

@@ -1,6 +1,6 @@
 # Wellness Signal Tracker
 
-Real-time facial analysis dashboard that tracks blink rate, brow tension, and expression to compute a live "wellness score" — built to flag early signs of screen fatigue and stress during long work sessions.
+Real-time facial analysis dashboard that tracks blink rate, brow tension, and expression to compute a live "wellness score" — built to flag early signs of screen fatigue and stress during long work sessions. Adds a smart drowsiness alert system, an end-of-session AI report, and persisted session history with before/after comparison.
 
 ![Status](https://img.shields.io/badge/status-hackathon%20submission-blueviolet)
 
@@ -9,12 +9,18 @@ Real-time facial analysis dashboard that tracks blink rate, brow tension, and ex
 Point your webcam at the dashboard and it tracks, in real time:
 
 - **Wellness Score (0–100)** — composite metric that drops with abnormal blink rate, high brow tension, or a stressed expression
-- **Blink Rate** — blinks per minute, detected from eye-region motion
-- **Brow Tension (0–100)** — how tightly your eyebrows are drawn toward your eyes
+- **Blink Rate** — blinks per minute, detected from Eye Aspect Ratio (EAR) dips with hysteresis
+- **Brow Tension (0–100)** — how far the brows have dropped below your calibrated neutral height
 - **Expression** — neutral / focused / stressed, classified from brow tension + eye aspect ratio
 - **Live chart** — wellness score and blink rate plotted over the session
 - **Wellness tips** — contextual nudges based on current state
 - **Historical data** — readings saved to database for trend analysis
+
+Plus the three session-level features:
+
+- **Smart Drowsiness Alert** — flags *sustained* eye closure (≥1.5 s) or a repeated slow-closure pattern (3+ in 30 s) and shows an animated "⚠️ Drowsiness Detected — Take a Short Break" banner with an optional Web Audio sound alert (mute/unmute control, persisted). Single blinks and face loss never trigger it; the alert clears automatically once the user's eyes stay open.
+- **End-of-Session Report** — stopping the camera generates a SESSION SUMMARY computed from real per-second session samples: focus score, attention stability, blink rate (normal/low/high), drowsiness events, session duration, recommended break, and a personalized recommendation — displayed with animated SVG progress rings and "Start New Session" / "Close Report" actions.
+- **Session History & Comparison** — every completed session is persisted; a Session History section shows focus/stability/drowsiness/duration trend charts, a session table, and a before-vs-after comparison of any two sessions with deltas and an improving/decreasing verdict. History survives a page refresh and can be cleared.
 
 ## How it works
 
@@ -25,7 +31,8 @@ Backend: YuNet detects face → dlib predicts 68 landmarks → metrics calculate
                                                          ↓
 Response: overlay image + wellness data ← OpenCV draws landmarks
                                                          ↓
-                                Django Channels (WebSocket) → live dashboard update
+                        Dashboard JS → live metric/chart update (WebSocket
+                        channel kept open for future server broadcasts)
 ```
 
 ### Face & landmark detection
@@ -37,35 +44,49 @@ Response: overlay image + wellness data ← OpenCV draws landmarks
 ### Metric calculation
 
 **Blink rate (blinks/min)**
-Motion-based — frame differences in the eye region are used to detect close/open transitions, which are then converted to a per-minute rate.
+Landmark-based — the Eye Aspect Ratio (EAR) of both eyes is computed every frame. Thresholds come from a per-user adaptive baseline: the running median of EAR over the last 10 s of frontal, open-eye frames (alert-active and closed frames are ignored), so a wide/narrow calibration moment can't skew detection. Dips below 75% of that baseline count as a closing eye; reopening above 85% (hysteresis) completes the blink. A blink is a 1–5 frame dip lasting ≤0.4 s; longer closures are tracked separately (see below). Blinks are kept in a rolling 60 s window and converted to a per-minute rate (scaled by observed time during the first 15 s, so it never reads 0 while warming up).
 
 **Brow tension (0–100)**
-Distance between eyebrow landmarks (17–26) and eye landmarks (36–47), normalized to a 0–100 scale. Shorter distance (brows drawn down) → higher tension.
+Percentage drop from the user's calibrated neutral brow height × 3.0 gain, capped at 100. Neutral height is the median brow height recorded during the 4 s calibration.
 
 **Expression (neutral / focused / stressed)**
-Composite of brow tension and Eye Aspect Ratio (EAR):
-- `brow_tension > 60` and `EAR < 0.25` → **stressed**
-- `brow_tension > 40` → **focused**
+Composite of average brow tension and EAR ratio (EAR / baseline):
+- `brow_tension > 25` and `ratio < 0.85` → **stressed**
+- `brow_tension > 12` → **focused**
 - otherwise → **neutral**
 
 **Wellness score (0–100)**
 ```
-100 - blink_penalty - brow_penalty - expression_penalty
+100 − blink penalty − (brow tension × 0.4) − expression penalty − squint penalty
 ```
-- Abnormal blink rate → −20
-- High brow tension → up to −30
-- Stressed expression → −25
+- Abnormal blink rate: `>25/min` → −25, `>20` → −15, `<8` → −20, `<10` → −15, `<12` → −5
+- Brow tension: −0.4 per point (up to −40)
+- Stressed → −20, focused → −8
+- EAR below 85% of baseline (squinting / heavy eyelids) → −5
+
+**Drowsiness detection (alert system)**
+Reuses the same adaptive EAR hysteresis state as blink detection — no extra model:
+- eyes held below the close threshold (75% of the adaptive baseline) for **≥1.5 s** → sustained event
+- or **3+ slow closures (0.4–1.5 s each) within 30 s** → repeated-pattern event
+- clears after the eyes stay open for 4 s; face loss resets tracking so stale timestamps can never fake an episode; events are rate-limited to 1 per 10 s
+- the client requires 2 consecutive drowsy readings before showing the banner (single-frame flicker protection) and hides it on the first reading with the alert cleared
+
+**Session report metrics** (all computed client-side from 1-sample-per-second session data):
+- *Focus Score* — mean wellness score of the session
+- *Attention Stability* — % of tracked seconds with focus ≥ 70
+- *Drowsiness-Free* — % of the session without an active alert
+- *Recommended Break* — 2/3/5/10 min based on duration, focus, stability, and drowsiness events
 
 ## Tech stack
 
 | Layer | Tech |
 |---|---|
 | Backend | Django + Django Channels |
-| Real-time | WebSocket (Django Channels) |
+| Real-time | HTTP frame pipeline (+ WebSocket channel for broadcasts) |
 | Face detection | OpenCV DNN (YuNet) |
 | Landmarks | dlib 68-point predictor |
 | Frontend | HTML / CSS / JavaScript + Chart.js |
-| Database | SQLite (dev) — MySQL (production) |
+| Session storage | Django ORM — SQLite (dev) — MySQL (production) |
 
 **Why Django?** It was the required stack for the CodeStorm hackathon. Django Channels gave us WebSocket support for the real-time dashboard without switching frameworks.
 
@@ -112,10 +133,13 @@ codestorm/
 │   ├── apps.py
 │   ├── consumers.py          # WebSocket consumer
 │   ├── face_analyzer.py      # YuNet + dlib pipeline
-│   ├── models.py             # WellnessReading model
+│   ├── models.py             # WellnessReading + SessionRecord models
+│   ├── migrations/
+│   │   ├── 0001_initial.py       # WellnessReading
+│   │   └── 0002_sessionrecord.py # SessionRecord (session history)
 │   ├── urls.py               # API endpoints
-│   ├── views.py              # /api/analyze/ endpoint
-│   └── wellness_engine.py    # Metric calculations
+│   ├── views.py              # /api/analyze/ + session history endpoints
+│   └── wellness_engine.py    # Metric + drowsiness calculations
 ├── wellness/
 │   ├── __init__.py
 │   ├── asgi.py               # ASGI config for WebSocket
@@ -140,23 +164,26 @@ codestorm/
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Dashboard page |
-| `/api/analyze/` | POST | Analyze webcam frame |
+| `/api/analyze/` | POST | Analyze webcam frame (returns overlay + wellness incl. `drowsy`) |
 | `/api/latest/` | GET | Get latest reading |
 | `/api/history/` | GET | Get historical readings |
-| `/ws/wellness/` | WebSocket | Real-time updates |
+| `/api/readings/` | GET | Last hour of readings |
+| `/api/sessions/` | GET | Completed session history (chronological) |
+| `/api/sessions/save/` | POST | Persist a completed session report |
+| `/api/sessions/clear/` | DELETE | Clear all session history |
+| `/ws/wellness/` | WebSocket | Real-time update channel |
 
 ## Known limitations
 
 - dlib's frontal face detector isn't used (system-specific issue); YuNet handles detection instead
-- Blink detection is motion-based, not landmark-based — sensitive to camera shake
 - Single-face tracking only
 - Approximate landmarks used when dlib predictor fails
+- Drowsiness is inferred from eye closure only (no head-pose/yawn detection)
 
 ## Roadmap (post-hackathon)
 
 - ML-based pattern classification over historical session data
 - Smarter, personalized wellness tip triggers
-- Multi-session history and trends
 - Multi-face support
 - Mobile app version
 

@@ -9,6 +9,16 @@
 </head>
 <body>
     <div class="dashboard">
+        <div id="toastContainer" class="toast-container"></div>
+
+        <div id="drowsyAlert" class="drowsy-alert" role="alert" aria-live="assertive">
+            <span class="drowsy-alert-icon">⚠️</span>
+            <div class="drowsy-alert-body">
+                <strong class="drowsy-alert-title">Drowsiness Detected — Take a Short Break</strong>
+                <span id="drowsyAlertSub" class="drowsy-alert-sub">Take a short break - Look away and stretch for a minute</span>
+            </div>
+        </div>
+
         <aside class="sidebar">
             <div class="sidebar-logo">
                 <span class="logo-icon">💙</span>
@@ -44,12 +54,16 @@
                         </div>
                         <div class="video-controls">
                             <div class="status-info">
-                                <span class="fps-label">FPS <strong id="fps">13</strong></span>
+                                <span class="fps-label">FPS <strong id="fps">0</strong></span>
+                                <button id="soundToggle" class="sound-toggle" type="button"
+                                        title="Mute alert sound" aria-label="Mute alert sound" aria-pressed="false">
+                                    <span id="soundIcon">🔊</span>
+                                </button>
                                 <span class="tracking-status">
                                     <span class="status-dot"></span> tracking active
                                 </span>
                             </div>
-                            <button id="startBtn" class="btn-primary">Stop camera</button>
+                            <button id="startBtn" class="btn-primary">Start camera</button>
                             <div id="cameraStatus" class="camera-status"></div>
                         </div>
                     </div>
@@ -58,17 +72,17 @@
                 <div class="right-panel">
                     <div class="metrics-section">
                         <div class="metric-card score-card">
-                            <div class="score" id="wellnessScore">80</div>
+                                <div class="score" id="wellnessScore">--</div>
                             <div class="score-bar">
                                 <div class="score-fill" id="scoreFill"></div>
                             </div>
                         </div>
                         <div class="metric-card">
-                            <div class="value" id="blinkRate">30</div>
+                                <div class="value" id="blinkRate">--</div>
                             <div class="unit">/min</div>
                         </div>
                         <div class="metric-card">
-                            <div class="value" id="browTension">0.0</div>
+                                <div class="value" id="browTension">--</div>
                             <div class="unit">tension</div>
                         </div>
                         <div class="metric-card">
@@ -103,32 +117,145 @@
                                 </tr>
                             </thead>
                             <tbody id="sessionLog">
-                                <tr>
-                                    <td>18:00:41</td>
-                                    <td>80</td>
-                                    <td>30/min</td>
-                                    <td><span class="expr-badge neutral">Neutral</span></td>
-                                </tr>
-                                <tr>
-                                    <td>18:00:26</td>
-                                    <td>76</td>
-                                    <td>28/min</td>
-                                    <td><span class="expr-badge neutral">Neutral</span></td>
-                                </tr>
-                                <tr>
-                                    <td>18:00:11</td>
-                                    <td>62</td>
-                                    <td>24/min</td>
-                                    <td><span class="expr-badge focused">Focused</span></td>
-                                </tr>
                             </tbody>
                         </table>
                     </div>
                 </div>
             </div>
+
+            <section class="history-section" id="historySection">
+                <div class="history-head">
+                    <h3 class="section-title history-title">Session history</h3>
+                    <button id="clearHistoryBtn" class="btn-ghost btn-small" type="button">Clear history</button>
+                </div>
+
+                <p class="trend-summary" id="trendSummary">Complete and stop a session to start tracking your trends.</p>
+
+                <div class="history-charts">
+                    <div class="history-chart-card">
+                        <div class="chart-header">
+                            <span class="legend-item"><span class="legend-dot green"></span> Focus score</span>
+                            <span class="legend-item"><span class="legend-dot light"></span> Attention stability</span>
+                        </div>
+                        <div class="history-canvas-wrap"><canvas id="focusTrendChart"></canvas></div>
+                    </div>
+                    <div class="history-chart-card">
+                        <div class="chart-header">
+                            <span class="legend-item"><span class="legend-dot red"></span> Drowsiness events</span>
+                            <span class="legend-item"><span class="legend-dot cyan"></span> Duration (min)</span>
+                        </div>
+                        <div class="history-canvas-wrap"><canvas id="drowsyTrendChart"></canvas></div>
+                    </div>
+                </div>
+
+                <div class="compare-panel">
+                    <div class="compare-header">
+                        <span class="compare-label">Compare sessions</span>
+                        <div class="compare-selects">
+                            <select id="compareA" class="compare-select" aria-label="Earlier session"></select>
+                            <span class="compare-arrow">vs</span>
+                            <select id="compareB" class="compare-select" aria-label="Later session"></select>
+                        </div>
+                    </div>
+                    <div class="compare-grid" id="compareGrid"></div>
+                    <p class="compare-verdict" id="compareVerdict">Save at least two sessions to compare them.</p>
+                </div>
+
+                <div class="history-table-wrap" style="display:none;">
+                    <table class="session-table history-table">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Duration</th>
+                                <th>Focus</th>
+                                <th>Stability</th>
+                                <th>Blink</th>
+                                <th>Drowsy</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyTableBody"></tbody>
+                    </table>
+                </div>
+                <p class="history-empty" id="historyEmpty">No saved sessions yet. Stop a camera session to save your first report.</p>
+            </section>
         </main>
     </div>
-    
+
+    <div id="reportModal" class="report-modal" aria-hidden="true">
+        <div class="report-backdrop" id="reportBackdrop"></div>
+        <div class="report-card" role="dialog" aria-modal="true" aria-labelledby="reportTitle">
+            <div class="report-head">
+                <div>
+                    <h2 class="report-title" id="reportTitle">SESSION SUMMARY</h2>
+                    <p class="report-date" id="reportDate"></p>
+                </div>
+                <button class="report-x" id="reportCloseX" type="button" aria-label="Close report">×</button>
+            </div>
+
+            <div class="report-rings">
+                <div class="ring">
+                    <svg viewBox="0 0 100 100" aria-hidden="true">
+                        <circle class="ring-track" cx="50" cy="50" r="42"></circle>
+                        <circle class="ring-fill ring-green" id="ringFocus" cx="50" cy="50" r="42"></circle>
+                    </svg>
+                    <div class="ring-center">
+                        <span class="ring-value" id="ringFocusValue">0%</span>
+                        <span class="ring-label">Focus Score</span>
+                    </div>
+                </div>
+                <div class="ring">
+                    <svg viewBox="0 0 100 100" aria-hidden="true">
+                        <circle class="ring-track" cx="50" cy="50" r="42"></circle>
+                        <circle class="ring-fill ring-cyan" id="ringStability" cx="50" cy="50" r="42"></circle>
+                    </svg>
+                    <div class="ring-center">
+                        <span class="ring-value" id="ringStabilityValue">0%</span>
+                        <span class="ring-label">Attention Stability</span>
+                    </div>
+                </div>
+                <div class="ring">
+                    <svg viewBox="0 0 100 100" aria-hidden="true">
+                        <circle class="ring-track" cx="50" cy="50" r="42"></circle>
+                        <circle class="ring-fill ring-blue" id="ringAlert" cx="50" cy="50" r="42"></circle>
+                    </svg>
+                    <div class="ring-center">
+                        <span class="ring-value" id="ringAlertValue">0%</span>
+                        <span class="ring-label">Drowsiness-Free</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="report-stats">
+                <div class="report-stat">
+                    <span class="report-stat-label">Blink Rate</span>
+                    <span class="report-stat-value" id="repBlink">--</span>
+                </div>
+                <div class="report-stat">
+                    <span class="report-stat-label">Drowsiness Events</span>
+                    <span class="report-stat-value" id="repDrowsy">--</span>
+                </div>
+                <div class="report-stat">
+                    <span class="report-stat-label">Session Duration</span>
+                    <span class="report-stat-value" id="repDuration">--</span>
+                </div>
+                <div class="report-stat">
+                    <span class="report-stat-label">Recommended Break</span>
+                    <span class="report-stat-value accent" id="repBreak">--</span>
+                </div>
+            </div>
+
+            <div class="report-reco">
+                <span>💡</span>
+                <p id="repReco">—</p>
+            </div>
+
+            <div class="report-actions">
+                <button id="reportStartNew" class="btn-primary" type="button">Start New Session</button>
+                <button id="reportClose" class="btn-ghost" type="button">Close Report</button>
+            </div>
+        </div>
+    </div>
+
     <script src="/static/js/dashboard.js"></script>
 </body>
 </html>
