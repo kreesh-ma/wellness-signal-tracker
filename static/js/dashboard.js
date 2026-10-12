@@ -60,6 +60,7 @@ function initChart() {
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
+                animation: false,
                 interaction: {
                     mode: 'index',
                     intersect: false
@@ -129,11 +130,16 @@ function connectWebSocket() {
     };
 }
 
+function capExpr(expr) {
+    expr = String(expr || '');
+    return expr.charAt(0).toUpperCase() + expr.slice(1);
+}
+
 function updateMetrics(data) {
     scoreEl.textContent = data.wellness_score;
     blinkEl.textContent = data.blink_rate;
     browEl.textContent = data.brow_tension;
-    exprEl.textContent = data.expression;
+    exprEl.textContent = capExpr(data.expression);
     scoreFill.style.width = data.wellness_score + '%';
     if (data.tip) tipText.textContent = data.tip;
     
@@ -233,7 +239,7 @@ function addSessionEntry(data) {
         <td>${time}</td>
         <td>${data.wellness_score}</td>
         <td>${data.blink_rate}/min</td>
-        <td><span class="expr-badge ${exprClass}">${data.expression}</span></td>
+        <td><span class="expr-badge ${exprClass}">${capExpr(data.expression)}</span></td>
     `;
     
     sessionLog.insertBefore(row, sessionLog.firstChild);
