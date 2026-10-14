@@ -167,6 +167,19 @@ class WellnessEngine:
         self.face_lost_pending = False
         self.face_lost_since = None
         self.closed_drowsy_seconds = 0.0
+        # Blink-rate session state. Without this a restarted camera reuses the
+        # SAME cached engine (keyed by Django session_key) and the new session
+        # started from the PREVIOUS session's rate/timestamps instead of 0.
+        # Reset the counters and restart the warmup window so the rate rebuilds
+        # from 0; calibration (baseline / neutral pose) is kept so the user is
+        # not forced to re-calibrate on every camera start.
+        self.blink_count = 0
+        self.blink_rate = 0
+        self.blink_timestamps.clear()
+        self.last_blink_time = 0.0
+        self.track_start = time.time()   # new session's duration/warmup starts now
+        self.warming_up = True
+        self.blink_rate_reliable = False
 
     def note_face_lost(self, now=None):
         """Called by the view when the detector found no face in the frame.
