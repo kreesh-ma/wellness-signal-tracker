@@ -49,6 +49,9 @@ class WellnessEngine:
     OPEN_RATIO = 0.85         # informational only (legacy display / debug)
     MAX_BLINK_SECONDS = 0.4   # <=0.4s run = blink; longer = slow/sustained
     MIN_BLINK_INTERVAL = 0.15
+    CLOSE_END_CONFIRM = 2     # consecutive open frames that confirm a run ended
+                              # (debounce: kills 1-frame EAR flicker splits that
+                              # made one blink count twice at webcam fps)
     INVALID_HOLD_SECONDS = 0.3  # tolerate short invalid gaps inside a run
 
     # --- blink rate ---
@@ -122,6 +125,8 @@ class WellnessEngine:
         self.close_start = None       # when the current run began
         self.close_frames = 0         # valid frames in the current run
         self.close_min_ear = 1.0
+        self.open_frames = 0          # consecutive open-eye frames seen (debounce)
+        self.close_end_t = None       # first open frame's t = the run's true end
         self.deep_active = False       # inside a deep (< deep_thr) span
         self.deep_start = None         # when the current deep span began
         self.last_valid_t = None      # last valid (usable) EAR frame
@@ -160,6 +165,8 @@ class WellnessEngine:
         self.close_active = False
         self.close_start = None
         self.close_frames = 0
+        self.open_frames = 0
+        self.close_end_t = None
         self.deep_active = False
         self.deep_start = None
         self.last_valid_t = None
@@ -302,6 +309,8 @@ class WellnessEngine:
         self.close_start = None
         self.close_frames = 0
         self.close_min_ear = 1.0
+        self.open_frames = 0
+        self.close_end_t = None
 
     def _forget_deep(self):
         self.deep_active = False
@@ -364,6 +373,12 @@ class WellnessEngine:
             self._forget_deep()
 
         # ---- BLINK run (counting + sustained alert + banner timer) ----
+        # A run ends only after CLOSE_END_CONFIRM CONSECUTIVE open-eye frames
+        # (debounce). dlib EAR is noisy at webcam fps: a single mid-blink frame
+        # can flicker above blink_thr, which used to SPLIT one physical blink
+        # into two short runs - both counted -> ~2x over-count (observed live:
+        # 10 real blinks reported as ~19). The run's true end is the FIRST
+        # open frame, so duration classification is unchanged by the debounce.
         eye_closure_sec = 0.0
         if ear < self.blink_thr:
             if not self.close_active:
@@ -372,6 +387,8 @@ class WellnessEngine:
                 self.close_frames = 0
                 self.close_min_ear = 1.0
             self.close_frames += 1
+            self.open_frames = 0        # closed again: cancel any pending end
+            self.close_end_t = None
             self.close_min_ear = min(self.close_min_ear, ear)
             close_dur = now - self.close_start
             deep_enough = self.close_min_ear < self.deep_thr
@@ -397,47 +414,59 @@ class WellnessEngine:
                         % (close_dur, self.DROWSY_CLOSED_SECONDS,
                            self.close_min_ear, self.deep_thr, pitch_delta))
         elif self.close_active:
-            run_dur = now - self.close_start
-            run_min = self.close_min_ear
-            self._forget_closure()
-            self.last_closure = 0.0
-            if run_dur <= self.MAX_BLINK_SECONDS:
-                if now - self.last_blink_time > self.MIN_BLINK_INTERVAL:
-                    self.blink_count += 1
-                    self.blink_timestamps.append(now)
-                    self.last_blink_time = now
-                    log.debug("blink #%d frames=%d dur=%.2f min_ear=%.3f",
-                              self.blink_count, self.close_frames, run_dur, run_min)
-            elif run_dur < self.DROWSY_CLOSED_SECONDS and run_min < self.deep_thr:
-                # slow DEEP closure feeds the pattern rule; a shallow squint
-                # (min >= deep_thr) that lingered below the sensitive blink
-                # line is just a squint - never drowsiness.
-                self.closure_history.append(now)
-                recent = [t for t in self.closure_history
-                          if now - t <= self.PATTERN_WINDOW_SECONDS]
-                if len(recent) >= self.PATTERN_MIN_CLOSURES:
-                    self._enter_drowsy(
-                        now, 'pattern',
-                        'pattern: %d slow closures (%.1f-%.0fs) in %.0fs, last=%.2fs'
-                        % (len(recent), self.SUSPICIOUS_CLOSURE_SECONDS,
-                           self.DROWSY_CLOSED_SECONDS, self.PATTERN_WINDOW_SECONDS,
-                           run_dur))
-            elif run_dur >= self.DROWSY_CLOSED_SECONDS and run_min < self.deep_thr:
-                # BORDERLINE sustained: the run reached DROWSY_CLOSED_SECONDS
-                # end-to-end but its last SAMPLED closed frame fell just under
-                # the threshold (the eye reopened between frames), so the
-                # mid-run check never saw close_dur >= 1.5 s. Fire here at the
-                # end so a real ~1.5-2 s closure still alerts. `not self.drowsy`
-                # skips closures that already alerted mid-run.
-                near_neutral = (pitch_delta is None
-                                or abs(pitch_delta) <= self.POSE_SUSTAINED_MAX_PITCH)
-                if near_neutral and not self.drowsy:
-                    self._enter_drowsy(
-                        now, 'sustained',
-                        'sustained closure %.2fs >= %.2fs at run end '
-                        '(min_ear=%.3f vs deep=%.3f, pitch_delta=%s)'
-                        % (run_dur, self.DROWSY_CLOSED_SECONDS,
-                           run_min, self.deep_thr, pitch_delta))
+            # open-eye frame while a run is pending: debounce it. The run only
+            # ENDS (and is classified) once CLOSE_END_CONFIRM consecutive open
+            # frames confirm the eye really reopened.
+            if self.close_end_t is None:
+                self.close_end_t = now
+            self.open_frames += 1
+            if self.open_frames < self.CLOSE_END_CONFIRM:
+                # not confirmed yet - keep the run alive, no classification
+                if self.close_min_ear < self.deep_thr:
+                    self.last_closure = self.close_end_t - self.close_start
+            else:
+                run_end = self.close_end_t          # true end = first open frame
+                run_dur = run_end - self.close_start
+                run_min = self.close_min_ear
+                self._forget_closure()
+                self.last_closure = 0.0
+                if run_dur <= self.MAX_BLINK_SECONDS:
+                    if run_end - self.last_blink_time > self.MIN_BLINK_INTERVAL:
+                        self.blink_count += 1
+                        self.blink_timestamps.append(run_end)
+                        self.last_blink_time = run_end
+                        log.debug("blink #%d frames=%d dur=%.2f min_ear=%.3f",
+                                  self.blink_count, self.close_frames, run_dur, run_min)
+                elif run_dur < self.DROWSY_CLOSED_SECONDS and run_min < self.deep_thr:
+                    # slow DEEP closure feeds the pattern rule; a shallow squint
+                    # (min >= deep_thr) that lingered below the sensitive blink
+                    # line is just a squint - never drowsiness.
+                    self.closure_history.append(run_end)
+                    recent = [t for t in self.closure_history
+                              if run_end - t <= self.PATTERN_WINDOW_SECONDS]
+                    if len(recent) >= self.PATTERN_MIN_CLOSURES:
+                        self._enter_drowsy(
+                            run_end, 'pattern',
+                            'pattern: %d slow closures (%.1f-%.0fs) in %.0fs, last=%.2fs'
+                            % (len(recent), self.SUSPICIOUS_CLOSURE_SECONDS,
+                               self.DROWSY_CLOSED_SECONDS, self.PATTERN_WINDOW_SECONDS,
+                               run_dur))
+                elif run_dur >= self.DROWSY_CLOSED_SECONDS and run_min < self.deep_thr:
+                    # BORDERLINE sustained: the run reached DROWSY_CLOSED_SECONDS
+                    # end-to-end but its last SAMPLED closed frame fell just under
+                    # the threshold (the eye reopened between frames), so the
+                    # mid-run check never saw close_dur >= 1.5 s. Fire here at the
+                    # end so a real ~1.5-2 s closure still alerts. `not self.drowsy`
+                    # skips closures that already alerted mid-run.
+                    near_neutral = (pitch_delta is None
+                                    or abs(pitch_delta) <= self.POSE_SUSTAINED_MAX_PITCH)
+                    if near_neutral and not self.drowsy:
+                        self._enter_drowsy(
+                            run_end, 'sustained',
+                            'sustained closure %.2fs >= %.2fs at run end '
+                            '(min_ear=%.3f vs deep=%.3f, pitch_delta=%s)'
+                            % (run_dur, self.DROWSY_CLOSED_SECONDS,
+                               run_min, self.deep_thr, pitch_delta))
 
         if self.open_since is None:
             self.open_since = now
