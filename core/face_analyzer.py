@@ -268,8 +268,9 @@ class FaceAnalyzer:
         landmarks, is_real = self.get_landmarks(frame, face)
 
         if is_real:
-            avg_ear = (self.eye_aspect_ratio(landmarks[36:42]) +
-                       self.eye_aspect_ratio(landmarks[42:48])) / 2.0
+            ear_left = self.eye_aspect_ratio(landmarks[36:42])
+            ear_right = self.eye_aspect_ratio(landmarks[42:48])
+            avg_ear = (ear_left + ear_right) / 2.0
             brow = self.brow_height(landmarks)
         else:
             # Fake landmarks would give a constant EAR/brow and poison calibration
@@ -281,7 +282,6 @@ class FaceAnalyzer:
 
         return {
             'face_detected': True,
-            'landmarks_real': is_real,
             'ear': avg_ear,
             'brow_height': brow,
             'brow_tension': brow,   # alias so existing views keep working; engine converts it

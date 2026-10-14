@@ -137,7 +137,10 @@ function capExpr(expr) {
 
 function updateMetrics(data) {
     scoreEl.textContent = data.wellness_score;
-    blinkEl.textContent = data.blink_rate;
+    // during calibration and the 15 s warmup the rate is not trustworthy yet -
+    // show '...' instead of a spike that is really 1-2 blinks scaled to a minute
+    const blinkReliable = data.calibrating || data.blink_rate_reliable === false;
+    blinkEl.textContent = blinkReliable ? '…' : data.blink_rate;
     browEl.textContent = data.brow_tension;
     exprEl.textContent = capExpr(data.expression);
     scoreFill.style.width = data.wellness_score + '%';
@@ -149,7 +152,7 @@ function updateMetrics(data) {
 
     const now = Date.now();
     if (now - lastSessionEntryTime >= 2000) {
-        addSessionEntry(data);
+        addSessionEntry(data, blinkReliable);
         lastSessionEntryTime = now;
     }
     
@@ -158,7 +161,7 @@ function updateMetrics(data) {
         const time = new Date().toLocaleTimeString();
         chart.data.labels.push(time);
         chart.data.datasets[0].data.push(data.wellness_score);
-        chart.data.datasets[1].data.push(data.blink_rate);
+        chart.data.datasets[1].data.push(blinkReliable ? null : data.blink_rate);
         
         if (chart.data.labels.length > 30) {
             chart.data.labels.shift();
@@ -230,15 +233,16 @@ function requestNotificationPermission() {
     }
 }
 
-function addSessionEntry(data) {
+function addSessionEntry(data, blinkReliable) {
     const time = new Date().toLocaleTimeString('en-US', { hour12: false });
     const exprClass = data.expression.toLowerCase();
+    const blinkCell = blinkReliable ? data.blink_rate + '/min' : '…';
     
     const row = document.createElement('tr');
     row.innerHTML = `
         <td>${time}</td>
         <td>${data.wellness_score}</td>
-        <td>${data.blink_rate}/min</td>
+        <td>${blinkCell}</td>
         <td><span class="expr-badge ${exprClass}">${capExpr(data.expression)}</span></td>
     `;
     
@@ -617,10 +621,14 @@ function collectSessionStats(data) {
         sessionStats.scoreCount++;
         sessionStats.samples.push(score);
     }
-    const blink = Number(data.blink_rate);
-    if (!isNaN(blink)) {
-        sessionStats.blinkSum += blink;
-        sessionStats.blinkCount++;
+    // warmup rates are 1-2 blinks scaled to a minute - they would drag the
+    // session average down to a false "Low"; skip until reliable
+    if (data.blink_rate_reliable !== false) {
+        const blink = Number(data.blink_rate);
+        if (!isNaN(blink)) {
+            sessionStats.blinkSum += blink;
+            sessionStats.blinkCount++;
+        }
     }
     // actual eyes-closed time during alert episodes (not banner visibility time)
     const closedSec = Number(data.closed_drowsy_sec);
@@ -753,13 +761,20 @@ function computeSessionReport() {
 const RING_CIRCUMFERENCE = 263.89;
 
 function setRing(circleId, valueId, pct) {
-    const bounded = Math.max(0, Math.min(100, pct));
+    const ok = Number.isFinite(pct);
+    const bounded = ok ? Math.max(0, Math.min(100, pct)) : 0;
     const circle = document.getElementById(circleId);
     if (circle) {
         circle.style.strokeDashoffset = String(RING_CIRCUMFERENCE * (1 - bounded / 100));
     }
     const label = document.getElementById(valueId);
-    if (label) label.textContent = Math.round(bounded) + '%';
+    if (label) label.textContent = ok ? Math.round(bounded) + '%' : '--';
+}
+
+function resetReportRings() {
+    setRing('ringFocus', 'ringFocusValue', 0);
+    setRing('ringStability', 'ringStabilityValue', 0);
+    setRing('ringAlert', 'ringAlertValue', 0);
 }
 
 function showReportModal(report) {
@@ -769,31 +784,28 @@ function showReportModal(report) {
             weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
         });
     document.getElementById('repBlink').textContent =
-        report.blink_rate_label + ' (' + report.blink_rate + '/min)';
+        'Session avg: ' + report.blink_rate_label + ' (' + report.blink_rate + '/min)';
     document.getElementById('repDrowsy').textContent = String(report.drowsiness_events);
     document.getElementById('repDuration').textContent = formatDuration(report.duration_seconds);
     document.getElementById('repBreak').textContent =
         report.break_minutes > 0 ? report.break_minutes + ' min' : 'None';
     document.getElementById('repReco').textContent = report.recommendation;
 
-    setRing('ringFocus', 'ringFocusValue', 0);
-    setRing('ringStability', 'ringStabilityValue', 0);
-    setRing('ringAlert', 'ringAlertValue', 0);
+    // rings are set synchronously with the modal content - no timer that can
+    // be lost to a navigation/close race and leave the gauges at 0%
+    setRing('ringFocus', 'ringFocusValue', report.focus_score);
+    setRing('ringStability', 'ringStabilityValue', report.attention_stability);
+    setRing('ringAlert', 'ringAlertValue', report.drowsy_free);
 
     reportModal.classList.add('open');
     reportModal.setAttribute('aria-hidden', 'false');
-
-    setTimeout(function() {
-        setRing('ringFocus', 'ringFocusValue', report.focus_score);
-        setRing('ringStability', 'ringStabilityValue', report.attention_stability);
-        setRing('ringAlert', 'ringAlertValue', report.drowsy_free);
-    }, 80);
 }
 
 function hideReportModal() {
     if (!reportModal) return;
     reportModal.classList.remove('open');
     reportModal.setAttribute('aria-hidden', 'true');
+    resetReportRings();   // next open animates from 0 via the CSS transition
 }
 
 function finishSessionReport() {

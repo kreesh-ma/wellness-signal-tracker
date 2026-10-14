@@ -27,14 +27,29 @@ class WellnessEngine:
     BASELINE_MIN_SAMPLES = 5   # ~0.5 s at 10 FPS: outruns the 1.5 s alert timer
     BASELINE_CLIP = (0.18, 0.40)  # sanity bounds against garbage landmarks
 
-    # --- blink detection (ratios of the adaptive open-eye EAR baseline) ---
-    CLOSE_RATIO = 0.75        # EAR < 0.75 x baseline = eye closing (enter threshold)
-    OPEN_RATIO = 0.85         # EAR > 0.85 x baseline = eye reopened (hysteresis exit)
-    DEEP_RATIO = 0.60         # deeper than this = closed eye: excluded from baseline
-    MIN_BELOW_FRAMES = 1      # at ~10 FPS a natural blink is often only 1-3 frames
-    MAX_BELOW_FRAMES = 5      # 1-5 frames (and <= MAX_BLINK_SECONDS) then reopen = blink
+    # --- blink detection (EAR runs, classified by duration) ---
+    # Blink runs use a line that tracks the user's own open-eye EAR:
+    # blink_thr = BLINK_RATIO x baseline (baseline = running median of
+    # open-eye frames). Real webcam blinks are brief 1-2 frame dips that may
+    # only reach 0.63-0.80 x baseline (low camera geometry flattens the
+    # closure), so the old 0.60 deep line missed them; open-eye noise sits
+    # >= 0.83 x baseline on real cameras, so 0.75 cleanly separates the two.
+    # The baseline itself is adaptive, so this line adapts per user.
+    # A run ends at the first valid frame back at/above blink_thr and is then
+    # classified by duration (and depth for the pattern rule):
+    #   <= MAX_BLINK_SECONDS  -> blink
+    #   0.4 s .. 1.5 s, min < deep_thr -> slow closure (feeds pattern rule)
+    #   0.4 s .. 1.5 s, min >= deep_thr -> squint/noise, ignored
+    #   >= 1.5 s              -> sustained (already alerted mid-run if deep)
+    # Brief invalid frames (pose flicker, shake, dropped landmarks) HOLD the
+    # run for up to INVALID_HOLD_SECONDS instead of destroying it.
+    DEEP_RATIO = 0.60         # drowsiness closure line: EAR < 0.60 x baseline
+    BLINK_RATIO = 0.75        # blink line: EAR < 0.75 x baseline (adaptive via baseline)
+    CLOSE_RATIO = 0.75        # informational only (legacy display / debug)
+    OPEN_RATIO = 0.85         # informational only (legacy display / debug)
+    MAX_BLINK_SECONDS = 0.4   # <=0.4s run = blink; longer = slow/sustained
     MIN_BLINK_INTERVAL = 0.15
-    MAX_BLINK_SECONDS = 0.4   # <=0.4s blink | 0.4-1.5s slow closure | >=1.5s alert
+    INVALID_HOLD_SECONDS = 0.3  # tolerate short invalid gaps inside a run
 
     # --- blink rate ---
     WINDOW_SECONDS = 60.0     # rolling window; count x (60 / observed seconds)
@@ -46,12 +61,20 @@ class WellnessEngine:
                                    # longer loss resets the closure timer
 
     # --- head-pose gate (neck rolls / looking away) ---
-    # Beyond these limits the eye landmarks are too distorted for a reliable
-    # EAR, so drowsiness tracking resets instead of raising false alerts.
-    # Normal frontal faces sit well inside both limits; blink/score thresholds
-    # above are unchanged.
-    POSE_MAX_YAW = 30.0       # deg, abs; head turned left/right
-    POSE_MAX_PITCH = 25.0     # deg, abs; looking down/up
+    # Gate is RELATIVE to the user's calibrated neutral pose (median pitch /
+    # yaw captured during calibration), not absolute: a webcam mounted below
+    # face level puts neutral pitch at 26-30 deg, and an absolute 25 deg
+    # limit gated 73% of frames in a live test, killing every blink. The
+    # limits themselves are unchanged - looking down at a keyboard is still
+    # +30-40 deg past neutral and still gated (sim S3 passes). During
+    # calibration, before neutral is known, the absolute gate applies.
+    POSE_MAX_YAW = 30.0       # deg, relative to neutral; head turned L/R
+    POSE_MAX_PITCH = 25.0     # deg, relative to neutral; looking down/up
+    # Sustained-closure alerts additionally require the head to be nearly
+    # neutral in pitch: a glance down at the keyboard foreshortens the eyes
+    # for seconds without being drowsy. Blink counting is NOT restricted by
+    # this (blinks happen at any small head tilt).
+    POSE_SUSTAINED_MAX_PITCH = 12.0
 
     # --- brow tension ---
     # Input is brow HEIGHT (lower = brows pulled down). Tension = % drop from the
@@ -84,19 +107,29 @@ class WellnessEngine:
         self.cal_start = None
         self.cal_ears = []
         self.cal_brows = []
+        self.cal_pitches = []    # abs pitch of every landmark frame in cal
+        self.cal_yaws = []
+        self.neutral_pitch = None  # median cal pitch = the user's own "straight ahead"
+        self.neutral_yaw = None
         self.baseline_samples = deque()   # (t, ear) frontal open-eye frames, last 10 s
         self.ear_baseline = None
         self.brow_baseline = 0.0
+        self.blink_thr = None     # adaptive closure line (see BLINK_RATIO)
         self.close_thr = self.open_thr = self.deep_thr = None
         self.track_start = None
 
-        self.below_frames = 0
-        self.min_ear = 1.0
-        self.dip_start = None
+        self.close_active = False     # inside a blink-line run
+        self.close_start = None       # when the current run began
+        self.close_frames = 0         # valid frames in the current run
+        self.close_min_ear = 1.0
+        self.deep_active = False       # inside a deep (< deep_thr) span
+        self.deep_start = None         # when the current deep span began
+        self.last_valid_t = None      # last valid (usable) EAR frame
         self.last_blink_time = 0.0
         self.blink_timestamps = deque()
         self.blink_count = 0
         self.blink_rate = 0
+        self.blink_rate_reliable = False
         self.warming_up = True
 
         # Drowsiness state (see DROWSY_* constants above).
@@ -104,12 +137,10 @@ class WellnessEngine:
         self.drowsy_rule = None        # 'sustained' or 'pattern' while drowsy
         self.drowsiness_events = 0
         self.open_since = None
-        self.was_closed = False
         self.last_closure = 0.0
         self.last_event_time = 0.0
         self.closure_history = deque(maxlen=12)
         self.last_tick = None
-        self.closure_blink_mark = 0   # blink_count when the current closure began
         self.prev_center = None       # last face-box center, for shake rejection
         self.last_tip_time = 0.0      # when the current tip was first shown
         self.face_lost_pending = False  # detector reported no face since last reading
@@ -122,12 +153,16 @@ class WellnessEngine:
         self.drowsy_rule = None
         self.drowsiness_events = 0
         self.open_since = None
-        self.was_closed = False
         self.last_closure = 0.0
         self.last_event_time = 0.0
         self.closure_history.clear()
         self.last_tick = None
-        self.closure_blink_mark = 0
+        self.close_active = False
+        self.close_start = None
+        self.close_frames = 0
+        self.deep_active = False
+        self.deep_start = None
+        self.last_valid_t = None
         self.prev_center = None
         self.face_lost_pending = False
         self.face_lost_since = None
@@ -144,8 +179,8 @@ class WellnessEngine:
 
     def _consume_face_lost(self, now):
         """Reset the half-finished closure left behind while the face was away.
-        Must run BEFORE update_blink sees the next frame, otherwise a stale
-        dip_start from before the face loss would fake a long closure.
+        Must run BEFORE update_closures sees the next frame, otherwise a stale
+        close_start from before the face loss would fake a long closure.
         Face loss <= FACE_LOST_RESET_SECONDS is treated as a flicker and
         keeps the closure timer running."""
         if not self.face_lost_pending:
@@ -159,10 +194,9 @@ class WellnessEngine:
 
     def _reset_eye_tracking(self, now, reason=''):
         """Forget any half-finished closure AND the slow-closure pattern
-        progress on an unreliable frame: face lost too long, face box jumped,
-        or head turned/tilted beyond the pose limits (neck roll)."""
-        self._break_dip()
-        self.was_closed = False
+        progress: the face was gone too long for the reading to be trusted."""
+        self._forget_closure()
+        self._forget_deep()
         self.last_closure = 0.0
         self.closure_history.clear()
         self.open_since = now
@@ -173,7 +207,8 @@ class WellnessEngine:
     # Calibration + adaptive baseline
     # ------------------------------------------------------------------
     def _apply_baseline(self, base):
-        """Clip a candidate baseline and derive the hysteresis thresholds."""
+        """Clip a candidate baseline and derive the thresholds (adaptive
+        blink line + deep/close/open ratios of baseline)."""
         base = float(np.clip(base, *self.BASELINE_CLIP))
         if base <= 0:
             return False
@@ -181,19 +216,30 @@ class WellnessEngine:
         self.close_thr = base * self.CLOSE_RATIO
         self.open_thr = base * self.OPEN_RATIO
         self.deep_thr = base * self.DEEP_RATIO
+        self.blink_thr = self._compute_blink_thr(base)
         return True
+
+    def _compute_blink_thr(self, base):
+        """Blink line: a fixed fraction of the user's own open-eye baseline.
+        The baseline is already an adaptive running median, so this tracks
+        each user without the lag/over-count of a per-sample sigma estimate."""
+        return base * self.BLINK_RATIO
 
     def _prune_baseline(self, now):
         while (self.baseline_samples
                and now - self.baseline_samples[0][0] > self.BASELINE_WINDOW_SECONDS):
             self.baseline_samples.popleft()
 
-    def _calibrate(self, ear, brow, now):
+    def _calibrate(self, ear, brow, now, pitch=None, yaw=None):
         if self.cal_start is None:
             self.cal_start = now
         self.cal_ears.append(ear)
         if brow is not None:
             self.cal_brows.append(brow)
+        if pitch is not None:
+            self.cal_pitches.append(float(pitch))
+        if yaw is not None:
+            self.cal_yaws.append(float(yaw))
 
         enough_time = now - self.cal_start >= self.CALIBRATION_SECONDS
         if enough_time and len(self.cal_ears) >= self.MIN_CAL_SAMPLES:
@@ -203,16 +249,26 @@ class WellnessEngine:
             # move it (unlike a mean, but without a percentile's upward bias)
             if self._apply_baseline(float(np.median(self.cal_ears))):
                 self.brow_baseline = float(np.median(self.cal_brows)) if self.cal_brows else 0.0
+                # the user's own neutral pose: median pitch/yaw seen in cal.
+                # The relative gate is measured against this, so a webcam
+                # below face level (neutral pitch ~27 deg) no longer gates
+                # 73% of frames the way an absolute 25 deg limit did.
+                self.neutral_pitch = (float(np.median(self.cal_pitches))
+                                      if self.cal_pitches else 0.0)
+                self.neutral_yaw = (float(np.median(self.cal_yaws))
+                                    if self.cal_yaws else 0.0)
                 self.calibrated = True
                 self.track_start = now
-                log.info("Calibrated: ear_baseline=%.3f brow_baseline=%.1f close_thr=%.3f open_thr=%.3f",
-                         self.ear_baseline, self.brow_baseline, self.close_thr, self.open_thr)
+                log.info("Calibrated: ear_baseline=%.3f brow_baseline=%.1f "
+                         "blink_thr=%.3f deep_thr=%.3f neutral_pitch=%.1f neutral_yaw=%.1f",
+                         self.ear_baseline, self.brow_baseline, self.blink_thr,
+                         self.deep_thr, self.neutral_pitch, self.neutral_yaw)
 
     def _update_baseline(self, ear, now):
         """Advance the running-median baseline with one frontal frame.
         Closed/blink frames and alert-active frames are ignored: only the
         user's open-eye level defines the baseline."""
-        if self.drowsy or ear < self.DEEP_RATIO * self.ear_baseline:
+        if self.drowsy or ear < self.BLINK_RATIO * self.ear_baseline:
             return
         self.baseline_samples.append((now, ear))
         self._prune_baseline(now)
@@ -224,113 +280,125 @@ class WellnessEngine:
                       len(self.baseline_samples))
 
     # ------------------------------------------------------------------
-    # Blink detection (EAR with hysteresis, no motion / brightness)
+    # Blink detection (deep-closure runs, duration-classified)
     # ------------------------------------------------------------------
-    def _break_dip(self):
-        self.below_frames = 0
-        self.min_ear = 1.0
-        self.dip_start = None
+    # Blink detection (dual threshold: adaptive blink line + deep line)
+    # ------------------------------------------------------------------
+    def _forget_closure(self):
+        self.close_active = False
+        self.close_start = None
+        self.close_frames = 0
+        self.close_min_ear = 1.0
 
-    def update_blink(self, ear, now=None):
+    def _forget_deep(self):
+        self.deep_active = False
+        self.deep_start = None
+
+    def update_closures(self, ear, now=None, pitch_delta=None):
+        """Closure state machine built on ONE robust run (plus informational
+        deep-span tracking).
+
+        The BLINK run (ear < blink_thr = 0.75 x baseline) is the primary
+        "eyes closed" signal. blink_thr sits ABOVE the closed-eye EAR plateau
+        even when dlib fails to collapse the eyelid points on a full closure
+        (a low camera makes a real 2-3 s closure plateau around 0.6 x baseline
+        instead of ~0.03), so the run holds cleanly through the WHOLE closure
+        until the eye truly reopens. deep_thr (0.60 x baseline) is used only
+        as a DEPTH GUARD - did the run ever reach deep depth? - so a shallow
+        lingering squint (dips below blink_thr but never near deep_thr) never
+        raises a sustained alert. (Driving the alert off a "below deep_thr"
+        run instead made it START late - EAR only briefly touches deep_thr on
+        a real low-camera closure - so it never held DROWSY_CLOSED_SECONDS and
+        real 2-3 s closures were missed.)
+
+        Classification of a BLINK run by duration (and depth):
+          <= MAX_BLINK_SECONDS                    -> blink
+          0.4-1.5 s and min < deep_thr           -> slow closure (feeds pattern)
+          0.4-1.5 s and min >= deep_thr          -> squint/noise, ignored
+          >= 1.5 s and min < deep_thr            -> sustained (alerted mid-run)
+        Invalid frames HOLD the run for up to INVALID_HOLD_SECONDS.
+        pitch_delta (deg vs neutral) gates ONLY the sustained alert.
+        Returns (drowsy, seconds_eyes_currently_closed_beyond_a_blink)."""
         now = now or time.time()
+        valid = bool(ear is not None and ear > 0 and self.calibrated
+                     and self.blink_thr and self.deep_thr)
 
-        # No face / bad landmarks: drop any half-finished blink so we never
-        # count a false blink when the face comes back.
-        if ear is None or ear <= 0 or not self.calibrated:
-            self._break_dip()
-            return
+        if not valid:
+            if (self.last_valid_t is not None
+                    and now - self.last_valid_t > self.INVALID_HOLD_SECONDS):
+                self._forget_closure()
+                self._forget_deep()
+            return self.drowsy, 0.0
 
-        if ear < self.close_thr:
-            if self.below_frames == 0:
-                self.dip_start = now
-            self.below_frames += 1
-            self.min_ear = min(self.min_ear, ear)
+        # a gap between usable frames longer than the hold window means we
+        # cannot classify the run reliably - drop it instead of guessing
+        if (self.last_valid_t is not None
+                and now - self.last_valid_t > self.INVALID_HOLD_SECONDS):
+            self._forget_closure()
+            self._forget_deep()
+        self.last_valid_t = now
 
-        elif ear > self.open_thr:
-            if self.below_frames > 0:
-                duration = now - (self.dip_start or now)
-                # a blink is a short below-threshold run (1-5 frames, <=0.4 s)
-                # followed by recovery; longer runs are slow closures/alerts
-                in_frame_range = (self.MIN_BELOW_FRAMES
-                                  <= self.below_frames <= self.MAX_BELOW_FRAMES)
-                is_blink = (in_frame_range
-                            and duration <= self.MAX_BLINK_SECONDS
-                            and now - self.last_blink_time > self.MIN_BLINK_INTERVAL)
-                if is_blink:
+        # ---- DEEP span (informational state only) ----
+        # Tracks ear < deep_thr spans for reset/compat. It does NOT drive the
+        # alert, banner timer or clear window - those come from the blink run
+        # below, because the deep span STARTS too late on a real low-camera
+        # closure to hold DROWSY_CLOSED_SECONDS reliably.
+        if ear < self.deep_thr or (self.deep_active and ear < self.blink_thr):
+            if not self.deep_active:
+                self.deep_active = True
+                self.deep_start = now
+        else:
+            self._forget_deep()
+
+        # ---- BLINK run (counting + sustained alert + banner timer) ----
+        eye_closure_sec = 0.0
+        if ear < self.blink_thr:
+            if not self.close_active:
+                self.close_active = True
+                self.close_start = now
+                self.close_frames = 0
+                self.close_min_ear = 1.0
+            self.close_frames += 1
+            self.close_min_ear = min(self.close_min_ear, ear)
+            close_dur = now - self.close_start
+            deep_enough = self.close_min_ear < self.deep_thr
+            if deep_enough:
+                self.last_closure = close_dur
+                # banner timer counts the FULL closure (not just post-alert)
+                eye_closure_sec = close_dur
+                # a real closure (> MAX_BLINK_SECONDS) interrupts the ~4 s
+                # clear window; a normal blink does NOT restart it, so the
+                # alert hides ~4 s after the eyes reopen even if blinking.
+                if close_dur > self.MAX_BLINK_SECONDS:
+                    self.open_since = None
+                # sustained drowsiness: eyes held closed long enough AND deep
+                # enough, head near neutral.
+                near_neutral = (pitch_delta is None
+                                or abs(pitch_delta) <= self.POSE_SUSTAINED_MAX_PITCH)
+                if (near_neutral and not self.drowsy
+                        and close_dur >= self.DROWSY_CLOSED_SECONDS):
+                    self._enter_drowsy(
+                        now, 'sustained',
+                        'sustained closure %.2fs >= %.2fs (min_ear=%.3f vs '
+                        'deep=%.3f, pitch_delta=%s)'
+                        % (close_dur, self.DROWSY_CLOSED_SECONDS,
+                           self.close_min_ear, self.deep_thr, pitch_delta))
+        elif self.close_active:
+            run_dur = now - self.close_start
+            run_min = self.close_min_ear
+            self._forget_closure()
+            self.last_closure = 0.0
+            if run_dur <= self.MAX_BLINK_SECONDS:
+                if now - self.last_blink_time > self.MIN_BLINK_INTERVAL:
                     self.blink_count += 1
                     self.blink_timestamps.append(now)
                     self.last_blink_time = now
-                    log.debug("blink #%d frames_below=%d dur=%.2f min_ear=%.3f",
-                              self.blink_count, self.below_frames, duration, self.min_ear)
-            self._break_dip()
-        # between close_thr and open_thr: hold state (this is the hysteresis zone)
-
-    def _check_continuity(self, now):
-        """Safety net for gaps the view could not report (e.g. server error):
-        a very long gap between readings is treated like face loss. Normal
-        face loss is signalled explicitly by note_face_lost()."""
-        if self.last_tick is not None and now - self.last_tick > self.FACE_GAP_SECONDS:
-            self._break_dip()
-            self.was_closed = False
-            self.last_closure = 0.0
-            self.open_since = now   # clear timer runs from the face return
-        self.last_tick = now
-
-    def _enter_drowsy(self, now, rule='', reason=''):
-        self.drowsy = True
-        self.drowsy_rule = rule
-        if now - self.last_event_time >= self.DROWSY_MIN_EVENT_GAP:
-            self.drowsiness_events += 1
-            self.last_event_time = now
-            log.info("Drowsiness event #%d (%s)", self.drowsiness_events, reason)
-
-    def update_drowsiness(self, valid, ear, now):
-        """Sustained-closure / repeated-closure drowsiness flag.
-
-        'Closed' means EAR strictly below close_thr - the same definition the
-        thresholds are built from. The blink hysteresis (below_frames) still
-        runs blink classification, but it can never hold the alert timer
-        hostage: if a threshold mismatch parks the EAR in the hysteresis band
-        (0.75-0.85 x baseline), no closure is running and no alert can fire;
-        the adaptive baseline re-absorbs the mismatch within ~0.5 s anyway.
-        Returns (drowsy, seconds_eyes_currently_closed)."""
-        closed = bool(valid and ear is not None and self.close_thr
-                      and ear < self.close_thr)
-        closure = (now - self.dip_start) if (closed and self.dip_start) else 0.0
-
-        if closed:
-            if not self.was_closed:
-                self.closure_blink_mark = self.blink_count
-            # a real closure (> MAX_BLINK_SECONDS) interrupts the ~4 s clear
-            # window; a normal blink does NOT restart it, so the alert hides
-            # ~4 s after the eyes reopen even if the user keeps blinking.
-            if closure > self.MAX_BLINK_SECONDS:
-                self.open_since = None
-            if not self.drowsy and closure >= self.DROWSY_CLOSED_SECONDS:
-                self._enter_drowsy(now, 'sustained',
-                                   'sustained closure %.2fs >= %.2fs'
-                                   % (closure, self.DROWSY_CLOSED_SECONDS))
-            self.was_closed = True
-            self.last_closure = closure
-            return self.drowsy, closure
-
-        # Eyes open (or face lost): a closure may have just ended.
-        if not valid:
-            # Face lost mid-closure - forget the half-finished closure, never
-            # count it as a suspicious one.
-            self.was_closed = False
-            self.last_closure = 0.0
-            self.open_since = now
-            return self.drowsy, 0.0
-
-        if self.was_closed:
-            # Slow closures are the middle band: too long to be a blink
-            # (<= MAX_BLINK_SECONDS) and shorter than the sustained alert
-            # (>= DROWSY_CLOSED_SECONDS). Only those count toward the pattern.
-            was_blink = self.blink_count > self.closure_blink_mark
-            if (not was_blink
-                    and self.SUSPICIOUS_CLOSURE_SECONDS <= self.last_closure
-                    < self.DROWSY_CLOSED_SECONDS):
+                    log.debug("blink #%d frames=%d dur=%.2f min_ear=%.3f",
+                              self.blink_count, self.close_frames, run_dur, run_min)
+            elif run_dur < self.DROWSY_CLOSED_SECONDS and run_min < self.deep_thr:
+                # slow DEEP closure feeds the pattern rule; a shallow squint
+                # (min >= deep_thr) that lingered below the sensitive blink
+                # line is just a squint - never drowsiness.
                 self.closure_history.append(now)
                 recent = [t for t in self.closure_history
                           if now - t <= self.PATTERN_WINDOW_SECONDS]
@@ -340,16 +408,57 @@ class WellnessEngine:
                         'pattern: %d slow closures (%.1f-%.0fs) in %.0fs, last=%.2fs'
                         % (len(recent), self.SUSPICIOUS_CLOSURE_SECONDS,
                            self.DROWSY_CLOSED_SECONDS, self.PATTERN_WINDOW_SECONDS,
-                           self.last_closure))
-            self.last_closure = 0.0
-        self.was_closed = False
+                           run_dur))
+            elif run_dur >= self.DROWSY_CLOSED_SECONDS and run_min < self.deep_thr:
+                # BORDERLINE sustained: the run reached DROWSY_CLOSED_SECONDS
+                # end-to-end but its last SAMPLED closed frame fell just under
+                # the threshold (the eye reopened between frames), so the
+                # mid-run check never saw close_dur >= 1.5 s. Fire here at the
+                # end so a real ~1.5-2 s closure still alerts. `not self.drowsy`
+                # skips closures that already alerted mid-run.
+                near_neutral = (pitch_delta is None
+                                or abs(pitch_delta) <= self.POSE_SUSTAINED_MAX_PITCH)
+                if near_neutral and not self.drowsy:
+                    self._enter_drowsy(
+                        now, 'sustained',
+                        'sustained closure %.2fs >= %.2fs at run end '
+                        '(min_ear=%.3f vs deep=%.3f, pitch_delta=%s)'
+                        % (run_dur, self.DROWSY_CLOSED_SECONDS,
+                           run_min, self.deep_thr, pitch_delta))
 
         if self.open_since is None:
             self.open_since = now
         elif self.drowsy and now - self.open_since >= self.DROWSY_CLEAR_SECONDS:
             self.drowsy = False
             self.drowsy_rule = None
-        return self.drowsy, 0.0
+        return self.drowsy, eye_closure_sec
+
+    def _check_continuity(self, now):
+        """Safety net for gaps the view could not report (e.g. server error):
+        a very long gap between readings is treated like face loss. Normal
+        face loss is signalled explicitly by note_face_lost()."""
+        if self.last_tick is not None and now - self.last_tick > self.FACE_GAP_SECONDS:
+            self._forget_closure()
+            self._forget_deep()
+            self.last_closure = 0.0
+            self.open_since = now   # clear timer runs from the face return
+        self.last_tick = now
+
+    def _enter_drowsy(self, now, rule='', reason=''):
+        self.drowsy = True
+        self.drowsy_rule = rule
+        # reset the ~4 s clear window from the ALERT onset: without this a
+        # stale open_since (set long before the closure) lets the bottom-of-
+        # update_closures logic clear drowsy on the very same frame it was
+        # set, so the banner flashes for 0 frames and Drowsiness-Free never
+        # drops. Normal blinks (< MAX_BLINK_SECONDS) do NOT reset open_since,
+        # so the alert still hides ~4 s after the eyes reopen even if the
+        # user keeps blinking.
+        self.open_since = None
+        if now - self.last_event_time >= self.DROWSY_MIN_EVENT_GAP:
+            self.drowsiness_events += 1
+            self.last_event_time = now
+            log.info("Drowsiness event #%d (%s)", self.drowsiness_events, reason)
 
     def _update_rate(self, now):
         while self.blink_timestamps and now - self.blink_timestamps[0] > self.WINDOW_SECONDS:
@@ -357,6 +466,7 @@ class WellnessEngine:
 
         elapsed = now - self.track_start
         self.warming_up = elapsed < self.WARMUP_SECONDS
+        self.blink_rate_reliable = not self.warming_up
 
         # Blinks in the last 60 s IS the per-minute rate once the session is a
         # minute old. Younger than that, scale by the time actually observed
@@ -437,9 +547,13 @@ class WellnessEngine:
         maintenance_tips = [
             "Good posture check - sit up straight!",
             "Hydration check! Drink some water.",
-            "Keep blinking! Your eyes are doing great.",
             "Roll your neck slowly in circles.",
         ]
+        # "Keep blinking!" reads as mockery when the session shows the user
+        # barely blinking (blink_rate < ~8, the same line the score penalises)
+        # or when they are drowsy / eyes currently closed. Suppress it there.
+        if not (self.blink_rate < 8 or self.drowsy or self.close_active):
+            maintenance_tips.insert(2, "Keep blinking! Your eyes are doing great.")
         positive_tips = [
             "You're doing great! Keep the momentum going.",
             "Feeling good? Keep it up!",
@@ -483,17 +597,30 @@ class WellnessEngine:
         now = time.time()
         valid = ear is not None and ear > 0
 
-        # head-pose gate: yaw/pitch beyond the limits = unreliable EAR
+        # head-pose gate (RELATIVE to the calibrated neutral pose).
+        # A webcam mounted below the face puts neutral pitch at 26-30 deg; an
+        # absolute 25 deg limit gated 73% of frames in a live test and killed
+        # every blink. So: during calibration (neutral unknown) the gate is
+        # OFF and we simply collect pitch/yaw for the neutral estimate; after
+        # calibration the gate measures deviation from that neutral. The
+        # limits (30/25) are unchanged - looking down at a keyboard is still
+        # +30-40 deg past neutral and still gated.
         pose_bad = False
         yaw_deg = pitch_deg = 0.0
+        pitch_delta = None
         if head_pose is not None:
             try:
                 yaw_deg = abs(float(head_pose.get('yaw') or 0.0))
                 pitch_deg = abs(float(head_pose.get('pitch') or 0.0))
-                pose_bad = (yaw_deg > self.POSE_MAX_YAW
-                            or pitch_deg > self.POSE_MAX_PITCH)
             except (AttributeError, TypeError, ValueError):
-                pose_bad = False
+                yaw_deg = pitch_deg = 0.0
+        if self.calibrated:
+            neutral_p = self.neutral_pitch if self.neutral_pitch is not None else 0.0
+            neutral_y = self.neutral_yaw if self.neutral_yaw is not None else 0.0
+            pitch_delta = pitch_deg - neutral_p
+            yaw_delta = yaw_deg - neutral_y
+            pose_bad = (abs(yaw_delta) > self.POSE_MAX_YAW
+                        or abs(pitch_delta) > self.POSE_MAX_PITCH)
         if pose_bad:
             valid = False
 
@@ -523,18 +650,6 @@ class WellnessEngine:
         prev_tick = self.last_tick
         self._consume_face_lost(now)
 
-        # unreliable frames (turned head, box jump) forget any half-finished
-        # closure and the slow-closure pattern progress - they can never
-        # raise (or extend) a drowsiness alert
-        if pose_bad:
-            self._reset_eye_tracking(
-                now, 'head pose yaw=%.1f pitch=%.1f (limits %.0f/%.0f)'
-                % (yaw_deg, pitch_deg, self.POSE_MAX_YAW, self.POSE_MAX_PITCH))
-        if shaky:
-            self._reset_eye_tracking(
-                now, 'face box jump %.0fpx vs face width %.0fpx'
-                % (jump_dist, jump_fw))
-
         if valid:
             self.last_ear = ear
         brow = None if brow_tension is None else float(brow_tension)
@@ -542,7 +657,7 @@ class WellnessEngine:
 
         if not self.calibrated:
             if valid:
-                self._calibrate(ear, brow, now)
+                self._calibrate(ear, brow, now, pitch=pitch_deg, yaw=yaw_deg)
             return {
                 'blink_rate': 0,
                 'brow_tension': 0,
@@ -554,18 +669,25 @@ class WellnessEngine:
                 'drowsy_rule': None,
                 'eye_closure_sec': 0.0,
                 'closed_drowsy_sec': round(self.closed_drowsy_seconds, 2),
+                'blink_rate_reliable': False,
             }
 
-        self.update_blink(ear if valid else None, now)
+        drowsy, eye_closure_sec = self.update_closures(
+            ear if valid else None, now, pitch_delta=pitch_delta)
         if valid:
             self._update_baseline(ear, now)
         self._update_rate(now)
-        drowsy, eye_closure_sec = self.update_drowsiness(valid, ear if valid else None, now)
         ear_now = ear if valid else self.last_ear
 
-        # accumulate time the eyes were ACTUALLY closed while drowsy (alert
-        # episodes) - used for the drowsiness-free %, not banner visibility
-        if self.drowsy and eye_closure_sec > 0 and prev_tick is not None:
+        # accumulate time the eyes stayed closed beyond a normal blink (slow /
+        # sustained closures). Gating on the closure length (not the drowsy
+        # flag) means the FULL closure counts, not just the sliver after the
+        # alert fires at DROWSY_CLOSED_SECONDS - so Drowsiness-Free actually
+        # drops when a real 2-3 s closure (or several slow ones) happens.
+        # Normal blinks (<= MAX_BLINK_SECONDS) never accumulate, so healthy
+        # blinking does not penalise the score. Drives drowsiness-free %, not
+        # banner visibility.
+        if eye_closure_sec > self.MAX_BLINK_SECONDS and prev_tick is not None:
             self.closed_drowsy_seconds += min(now - prev_tick, 0.5)
 
         # brow tension = how far brows have dropped below this user's neutral height
@@ -578,8 +700,8 @@ class WellnessEngine:
         score = self.calculate_wellness_score(self.blink_rate, avg_brow, expression, ear_now)
         tip = self.get_wellness_tip(score, expression, avg_brow)
 
-        log.debug("ear=%s thr=%.3f below=%d blinks=%d rate=%d brow=%.1f",
-                  ear, self.close_thr, self.below_frames, self.blink_count,
+        log.debug("ear=%s thr=%.3f closed=%d blinks=%d rate=%d brow=%.1f",
+                  ear, self.deep_thr, int(self.close_active), self.blink_count,
                   self.blink_rate, avg_brow)
 
         return {
@@ -593,4 +715,5 @@ class WellnessEngine:
             'drowsy_rule': self.drowsy_rule if drowsy else None,
             'eye_closure_sec': round(eye_closure_sec, 2),
             'closed_drowsy_sec': round(self.closed_drowsy_seconds, 2),
+            'blink_rate_reliable': self.blink_rate_reliable,
         }
