@@ -26,6 +26,12 @@ class WellnessEngine:
     BASELINE_WINDOW_SECONDS = 10.0
     BASELINE_MIN_SAMPLES = 5   # ~0.5 s at 10 FPS: outruns the 1.5 s alert timer
     BASELINE_CLIP = (0.18, 0.40)  # sanity bounds against garbage landmarks
+    # Only near-frontal frames update the baseline: a downward-tilted head
+    # foreshortens EAR, and feeding that to the running median drags the
+    # baseline (and the adaptive blink line) down until real blinks stop
+    # crossing it (observed live: blink rate stuck at 0/min while looking
+    # slightly down). 8 deg keeps normal webcam head bob in and slouch out.
+    BASELINE_MAX_PITCH = 8.0    # deg past neutral pitch that still updates baseline
 
     # --- blink detection (EAR runs, classified by duration) ---
     # Blink runs use a line that tracks the user's own open-eye EAR:
@@ -96,12 +102,40 @@ class WellnessEngine:
     # --- wellness tips ---
     TIP_INTERVAL_SECONDS = 60.0      # show a new tip at most once per minute
     LONG_SESSION_SECONDS = 20 * 60.0 # after 20 min, break tips are allowed at any score
+    # Posture tip: head pitched down (slouch) or turned too far vs neutral.
+    # The raw per-frame delta flickers around one threshold and made the tip
+    # flip-flop between "Good posture" and "Posture check" within seconds, so
+    # the signal is EMA-smoothed and gated with HYSTERESIS (a wider enter band
+    # than exit band) and the tip is held for a minimum time.
+    POSTURE_TIP_PITCH = 10.0         # deg past neutral pitch = looking down / slouching
+    POSTURE_TIP_YAW = 15.0           # deg past neutral yaw = head turned L/R
+    POSTURE_SMOOTH_ALPHA = 0.25      # EMA weight for new pose samples (lower = smoother)
+    POSTURE_ENTER_PITCH = 12.0       # enter "slouch" only clearly past neutral
+    POSTURE_EXIT_PITCH = 7.0         # leave "slouch" only clearly back upright
+    POSTURE_ENTER_YAW = 18.0
+    POSTURE_EXIT_YAW = 12.0
+    POSTURE_TIP_HOLD_SECONDS = 8.0   # keep a posture tip up at least this long
+
+    # --- head-pose compensation for EAR and brow tension ---
+    # Looking down foreshortens the eye aperture in dlib's landmark geometry
+    # even when the eye is OPEN (~0.001-0.0035 EAR/deg on real traces), which
+    # used to fake a sub-threshold EAR (false "Eyes closed" / drowsy) and to
+    # hide real blinks (0/min). We add the drop back before thresholding.
+    EAR_PITCH_SLOPE = 0.002          # EAR lost per deg of downward pitch
+    EAR_PITCH_COMP_MAX = 30          # deg; beyond this, full compensation
+    # Brow landmarks jitter when the head moves / tilts, spiking "tension"
+    # (observed 2 -> 47 on a head move) and faking Focused/Stressed. Brow
+    # tension is therefore only sampled on stable, near-neutral frames.
+    POSE_TENSION_PITCH = 12.0        # deg past neutral pitch = too tilted to trust brows
+    POSE_TENSION_YAW = 15.0          # deg past neutral yaw = head turned to trust brows
 
     def __init__(self):
         self.blink_history = deque(maxlen=300)
         self.brow_history = deque(maxlen=300)
         self.last_tip = ""
         self.last_ear = None
+        self.last_pitch_delta = None  # head pose vs neutral, for the posture tip
+        self.last_yaw_delta = None
         self.recalibrate()
 
     def recalibrate(self):
@@ -151,6 +185,10 @@ class WellnessEngine:
         self.face_lost_pending = False  # detector reported no face since last reading
         self.face_lost_since = None   # when the current face-loss streak began
         self.closed_drowsy_seconds = 0.0  # time actually eyes-closed while drowsy
+        # Posture-tip smoothing + hysteresis state (see POSTURE_* constants).
+        self.smooth_pitch_delta = None  # EMA of head pitch vs neutral
+        self.smooth_yaw_delta = None    # EMA of head yaw vs neutral
+        self.posture_slouching = False  # hysteretic slouch flag for the tip
 
     def reset_drowsiness(self):
         """Start a fresh monitoring session: drop counters and alert state."""
@@ -286,9 +324,13 @@ class WellnessEngine:
 
     def _update_baseline(self, ear, now):
         """Advance the running-median baseline with one frontal frame.
-        Closed/blink frames and alert-active frames are ignored: only the
-        user's open-eye level defines the baseline."""
+        Closed/blink frames, alert-active frames, and downward-tilted frames
+        are ignored: only the user's near-frontal open-eye level defines the
+        baseline, so a slouch cannot drag the blink line down and hide blinks."""
         if self.drowsy or ear < self.BLINK_RATIO * self.ear_baseline:
+            return
+        pd = self.last_pitch_delta
+        if pd is not None and pd > self.BASELINE_MAX_PITCH:
             return
         self.baseline_samples.append((now, ear))
         self._prune_baseline(now)
@@ -315,6 +357,17 @@ class WellnessEngine:
     def _forget_deep(self):
         self.deep_active = False
         self.deep_start = None
+
+    def _compensate_ear(self, ear, pitch_delta):
+        """Lift EAR back toward its neutral-pitch value when the head is tilted
+        down. Downward pitch foreshortens the eye aperture on real webcams
+        (~0.001-0.0035 EAR/deg) even with the eye open, so a threshold tuned
+        at neutral falsely reads "closed" when looking down. Returns the raw
+        EAR when there is nothing to compensate (upright head / no pose)."""
+        if ear is None or pitch_delta is None or pitch_delta <= 0:
+            return ear
+        deg = min(float(pitch_delta), self.EAR_PITCH_COMP_MAX)
+        return min(0.6, ear + self.EAR_PITCH_SLOPE * deg)
 
     def update_closures(self, ear, now=None, pitch_delta=None):
         """Closure state machine built on ONE robust run (plus informational
@@ -360,6 +413,14 @@ class WellnessEngine:
             self._forget_deep()
         self.last_valid_t = now
 
+        # Downward-pitch EAR foreshortening is undone ONLY for the open/closed
+        # boundary (blink line) so an OPEN eye looking down stays "open" and no
+        # false closure run starts. The depth guard keeps RAW EAR, so a genuine
+        # closure (which dips far below deep_thr even at a tilt) still registers
+        # as deep. Compensating depth too would lift a real closure across the
+        # deep line and suppress the drowsy alert.
+        ear_c = self._compensate_ear(ear, pitch_delta)
+
         # ---- DEEP span (informational state only) ----
         # Tracks ear < deep_thr spans for reset/compat. It does NOT drive the
         # alert, banner timer or clear window - those come from the blink run
@@ -380,7 +441,7 @@ class WellnessEngine:
         # 10 real blinks reported as ~19). The run's true end is the FIRST
         # open frame, so duration classification is unchanged by the debounce.
         eye_closure_sec = 0.0
-        if ear < self.blink_thr:
+        if ear_c < self.blink_thr:
             if not self.close_active:
                 self.close_active = True
                 self.close_start = now
@@ -565,11 +626,12 @@ class WellnessEngine:
         """Pick a tip that matches the current state. A tip stays on screen for at
         least TIP_INTERVAL_SECONDS. Break tips only appear after a 20 min
         session or 3+ counted drowsiness events; positive tips only when the
-        score is high."""
-        now = time.time()
-        if self.last_tip and now - self.last_tip_time < self.TIP_INTERVAL_SECONDS:
-            return self.last_tip
+        score is high AND no drowsiness alert is active.
 
+        Tip priority: drowsy alert > posture > normal score-based tip. While the
+        drowsy banner is active, only recovery/break tips are eligible - never a
+        positive tip like 'Feeling good? Keep it up!'."""
+        now = time.time()
         long_session = (self.track_start is not None
                         and now - self.track_start >= self.LONG_SESSION_SECONDS)
         break_allowed = long_session or self.drowsiness_events >= 3
@@ -586,8 +648,34 @@ class WellnessEngine:
             "Close your eyes and relax your jaw.",
             "Unclench your teeth and relax your forehead.",
         ]
+        positive_tips = [
+            "You're doing great! Keep the momentum going.",
+            "Feeling good? Keep it up!",
+            "Great focus - your eyes look relaxed.",
+        ]
+        # Posture tip: ONE clear message reflecting the CURRENT head pose -
+        # the old static "Good posture check - sit up straight!" read as a
+        # contradiction. The slouch flag uses the EMA-smoothed pose with
+        # HYSTERESIS so the tip does not flip-flop on frame-to-frame jitter.
+        sp = self.smooth_pitch_delta
+        sy = self.smooth_yaw_delta
+        if self.posture_slouching:
+            upright_p = (sp is None or sp < self.POSTURE_EXIT_PITCH)
+            upright_y = (sy is None or abs(sy) < self.POSTURE_EXIT_YAW)
+            if upright_p and upright_y:
+                self.posture_slouching = False
+        else:
+            down_p = (sp is not None and sp > self.POSTURE_ENTER_PITCH)
+            turn_y = (sy is not None and abs(sy) > self.POSTURE_ENTER_YAW)
+            if down_p or turn_y:
+                self.posture_slouching = True
+        slouching = self.posture_slouching
+        posture_tip = ("Posture check: sit up straight." if slouching
+                       else "Good posture. Keep it up.")
+        posture_tips = {"Posture check: sit up straight.",
+                        "Good posture. Keep it up."}
         maintenance_tips = [
-            "Good posture check - sit up straight!",
+            posture_tip,
             "Hydration check! Drink some water.",
             "Roll your neck slowly in circles.",
         ]
@@ -595,27 +683,58 @@ class WellnessEngine:
         # barely blinking (blink_rate < ~8, the same line the score penalises)
         # or when they are drowsy / eyes currently closed. Suppress it there.
         if not (self.blink_rate < 8 or self.drowsy or self.close_active):
-            maintenance_tips.insert(2, "Keep blinking! Your eyes are doing great.")
-        positive_tips = [
-            "You're doing great! Keep the momentum going.",
-            "Feeling good? Keep it up!",
-            "Great focus - your eyes look relaxed.",
+            maintenance_tips.append("Keep blinking! Your eyes are doing great.")
+        # Drowsy-specific tips: always actionable rest/break advice, never the
+        # tension-oriented recovery line that read as irrelevant under the banner.
+        drowsy_tips = [
+            "Drowsy? Look away from the screen and blink a few times.",
+            "Take a short break - stand up and stretch for 30 seconds.",
+            "Rest your eyes: look at something 20 feet away for 20 seconds.",
+            "Splash cold water on your face or take a quick walk.",
         ]
 
-        if score < 50:
+        # ---- priority ladder: Drowsy > Stress/low > Posture > Blink > Positive ----
+        # Each tier picks a pool whose tips are ALL appropriate for that state,
+        # so a positive / celebratory tip can never surface under a drowsy
+        # banner or a stressed / low score.
+        if self.drowsy:                          # tier 1: drowsy alert active
+            pool = list(drowsy_tips)
+        elif score < 50:                         # tier 2: stress / low score
             pool = list(recovery_tips)
             if break_allowed:
                 pool += break_tips
-        elif score < 70:
-            pool = list(maintenance_tips)
+        elif slouching:                          # tier 3: posture needs correcting
+            pool = [posture_tip,
+                    "Hydration check! Drink some water.",
+                    "Roll your neck slowly in circles."]
             if break_allowed:
                 pool += break_tips
-        elif score < 85:
+        elif self.blink_rate < 8:                # tier 4: under-blinking (screen stare)
+            pool = ["Rest your eyes for a minute. Look away from the screen.",
+                    "Try the 20-20-20 rule: Look 20ft away for 20 sec.",
+                    posture_tip,
+                    "Hydration check! Drink some water."]
+        else:                                    # tier 5: healthy - maintenance/positive
             pool = list(maintenance_tips)
+            if score >= 85:
+                pool += positive_tips
             if break_allowed:
                 pool += break_tips
-        else:
-            pool = positive_tips
+
+        # Hold a posture tip for at least POSTURE_TIP_HOLD_SECONDS so a small
+        # pose wobble (that slips past hysteresis) cannot swap the wording
+        # instantly. A drowsy alert or a low score still overrides at once.
+        if (not self.drowsy and score >= 50 and self.last_tip in posture_tips
+                and now - self.last_tip_time < self.POSTURE_TIP_HOLD_SECONDS):
+            return self.last_tip
+
+        # Refresh IMMEDIATELY if the tip on screen is no longer valid for the
+        # current state (e.g. a positive tip left over from a high-score moment
+        # now showing under a drowsy banner or a stressed score). Otherwise keep
+        # it for TIP_INTERVAL_SECONDS.
+        if (self.last_tip and self.last_tip in pool
+                and now - self.last_tip_time < self.TIP_INTERVAL_SECONDS):
+            return self.last_tip
 
         new_tip = random.choice(pool)
         if new_tip == self.last_tip and len(pool) > 1:
@@ -649,20 +768,31 @@ class WellnessEngine:
         # +30-40 deg past neutral and still gated.
         pose_bad = False
         yaw_deg = pitch_deg = 0.0
-        pitch_delta = None
+        pitch_delta = yaw_delta = None
         if head_pose is not None:
             try:
                 yaw_deg = abs(float(head_pose.get('yaw') or 0.0))
                 pitch_deg = abs(float(head_pose.get('pitch') or 0.0))
             except (AttributeError, TypeError, ValueError):
                 yaw_deg = pitch_deg = 0.0
-        if self.calibrated:
-            neutral_p = self.neutral_pitch if self.neutral_pitch is not None else 0.0
-            neutral_y = self.neutral_yaw if self.neutral_yaw is not None else 0.0
-            pitch_delta = pitch_deg - neutral_p
-            yaw_delta = yaw_deg - neutral_y
-            pose_bad = (abs(yaw_delta) > self.POSE_MAX_YAW
-                        or abs(pitch_delta) > self.POSE_MAX_PITCH)
+            if self.calibrated:
+                neutral_p = self.neutral_pitch if self.neutral_pitch is not None else 0.0
+                neutral_y = self.neutral_yaw if self.neutral_yaw is not None else 0.0
+                pitch_delta = pitch_deg - neutral_p
+                yaw_delta = yaw_deg - neutral_y
+                self.last_pitch_delta = pitch_delta   # remembered for the posture tip
+                self.last_yaw_delta = yaw_delta
+                # EMA-smooth the pose for posture decisions: raw deltas flicker
+                # frame-to-frame around the slouch threshold and flip-flopped tip.
+                a = self.POSTURE_SMOOTH_ALPHA
+                if self.smooth_pitch_delta is None:
+                    self.smooth_pitch_delta = pitch_delta
+                    self.smooth_yaw_delta = yaw_delta
+                else:
+                    self.smooth_pitch_delta += a * (pitch_delta - self.smooth_pitch_delta)
+                    self.smooth_yaw_delta += a * (yaw_delta - self.smooth_yaw_delta)
+                pose_bad = (abs(yaw_delta) > self.POSE_MAX_YAW
+                            or abs(pitch_delta) > self.POSE_MAX_PITCH)
         if pose_bad:
             valid = False
 
@@ -721,19 +851,29 @@ class WellnessEngine:
         self._update_rate(now)
         ear_now = ear if valid else self.last_ear
 
-        # accumulate time the eyes stayed closed beyond a normal blink (slow /
-        # sustained closures). Gating on the closure length (not the drowsy
-        # flag) means the FULL closure counts, not just the sliver after the
-        # alert fires at DROWSY_CLOSED_SECONDS - so Drowsiness-Free actually
-        # drops when a real 2-3 s closure (or several slow ones) happens.
-        # Normal blinks (<= MAX_BLINK_SECONDS) never accumulate, so healthy
-        # blinking does not penalise the score. Drives drowsiness-free %, not
-        # banner visibility.
-        if eye_closure_sec > self.MAX_BLINK_SECONDS and prev_tick is not None:
+        # Accumulate time the eyes stayed closed beyond a normal blink (slow /
+        # sustained closures). Based on the closure RUN length (close_active and
+        # close_dur > MAX_BLINK), NOT the deep classification: a half-open or
+        # low-camera closure dips below the deep line only briefly (so the old
+        # eye_closure_sec gate barely counted it and Drowsiness-Free read ~94%
+        # while the eyes were actually shut a much larger share of the session),
+        # yet the eye was still substantially closed for the whole run. Normal
+        # blinks (<= MAX_BLINK_SECONDS) never accumulate, so healthy blinking
+        # does not penalise the score. Drives drowsiness-free %, not banner.
+        if (self.close_active and self.close_start is not None
+                and (now - self.close_start) > self.MAX_BLINK_SECONDS
+                and prev_tick is not None):
             self.closed_drowsy_seconds += min(now - prev_tick, 0.5)
 
-        # brow tension = how far brows have dropped below this user's neutral height
-        if brow is not None and self.brow_baseline > 0:
+        # brow tension = how far brows have dropped below this user's neutral height.
+        # Only sample on stable, near-neutral head poses: dlib's brow landmarks
+        # jitter when the head moves or tilts, which used to spike tension
+        # (2 -> 47 on a single head move) and fake a Focused/Stressed label.
+        # Freezing tension on unstable frames keeps it a pure brow-furrow signal.
+        pd, yd = self.last_pitch_delta, self.last_yaw_delta
+        pose_stable = ((pd is None or abs(pd) <= self.POSE_TENSION_PITCH)
+                       and (yd is None or abs(yd) <= self.POSE_TENSION_YAW))
+        if brow is not None and self.brow_baseline > 0 and pose_stable:
             drop_pct = max(0.0, self.brow_baseline - brow) / self.brow_baseline * 100.0
             self.brow_history.append(min(100.0, drop_pct * self.BROW_GAIN))
         avg_brow = (sum(self.brow_history) / len(self.brow_history)) if self.brow_history else 0.0
