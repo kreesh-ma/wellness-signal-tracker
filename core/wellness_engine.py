@@ -674,16 +674,6 @@ class WellnessEngine:
                        else "Good posture. Keep it up.")
         posture_tips = {"Posture check: sit up straight.",
                         "Good posture. Keep it up."}
-        maintenance_tips = [
-            posture_tip,
-            "Hydration check! Drink some water.",
-            "Roll your neck slowly in circles.",
-        ]
-        # "Keep blinking!" reads as mockery when the session shows the user
-        # barely blinking (blink_rate < ~8, the same line the score penalises)
-        # or when they are drowsy / eyes currently closed. Suppress it there.
-        if not (self.blink_rate < 8 or self.drowsy or self.close_active):
-            maintenance_tips.append("Keep blinking! Your eyes are doing great.")
         # Drowsy-specific tips: always actionable rest/break advice, never the
         # tension-oriented recovery line that read as irrelevant under the banner.
         drowsy_tips = [
@@ -704,18 +694,27 @@ class WellnessEngine:
             if break_allowed:
                 pool += break_tips
         elif slouching:                          # tier 3: posture needs correcting
-            pool = [posture_tip,
-                    "Hydration check! Drink some water.",
-                    "Roll your neck slowly in circles."]
-            if break_allowed:
-                pool += break_tips
+            # Show the posture corrective DIRECTLY - no random hydration/neck
+            # co-members that used to win the draw and starve the posture tip.
+            # A previously-shown hydration tip is not in this pool, so the
+            # refresh below displaces it at once when the user slouches.
+            pool = [posture_tip]
         elif self.blink_rate < 8:                # tier 4: under-blinking (screen stare)
             pool = ["Rest your eyes for a minute. Look away from the screen.",
                     "Try the 20-20-20 rule: Look 20ft away for 20 sec.",
                     posture_tip,
                     "Hydration check! Drink some water."]
-        else:                                    # tier 5: healthy - maintenance/positive
-            pool = list(maintenance_tips)
+        else:                                    # tier 5: healthy - good posture is the reliable default
+            # Weight the good-posture tip so it shows consistently when the
+            # user is upright; hydration / neck-roll / keep-blinking remain as
+            # occasional variety so the tip is not stale.
+            pool = [posture_tip, posture_tip, posture_tip, posture_tip,
+                    "Hydration check! Drink some water.",
+                    "Roll your neck slowly in circles."]
+            # "Keep blinking!" reads as mockery when the user barely blinks
+            # (blink_rate < ~8) or is drowsy / eyes closed - suppress there.
+            if not (self.blink_rate < 8 or self.drowsy or self.close_active):
+                pool.append("Keep blinking! Your eyes are doing great.")
             if score >= 85:
                 pool += positive_tips
             if break_allowed:
